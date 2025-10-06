@@ -1,0 +1,31 @@
+# Build output
+bin/
+obj/
+out/
+*.dll
+*.exe
+*.pdb
+*.log
+*.cache
+*.tmp
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.swp
+*.bak
+*.old
+
+# Visual Studio / Rider / VSCode
+.vs/
+.idea/
+.vscode/
+
+# OS-generated files
+Thumbs.db
+.DS_Store
+
+# Local configuration (not needed in repo)
+launchSettings.json
