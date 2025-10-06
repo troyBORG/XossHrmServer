@@ -1,4 +1,5 @@
-# XossHrmServer
+# <img src="app_icon_64.png" alt="XossHrmServer Icon" width="48" align="center" /> XossHrmServer
+
 
 [![.NET 9](https://img.shields.io/badge/.NET-9.0-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-green)](#)
