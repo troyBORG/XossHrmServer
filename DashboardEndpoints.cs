@@ -1,3 +1,5 @@
+// DashboardEndpoints.cs — drop-in replacement
+using System.Globalization;
 using System.Text;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -5,7 +7,10 @@ using Microsoft.AspNetCore.Http;
 public static class DashboardEndpoints
 {
     /// <summary>
-    /// Adds log browser + dashboard endpoints that read CSV files in logsDir.
+    /// Adds: /dashboard (HTML), /logs (list), /log.csv (download), /log.json (rows), /logs/delete (POST).
+    /// CSVs are read with FileShare.ReadWrite so the "current live log" can be viewed while it's still being written.
+    /// Column mapping is header-driven: TimestampUTC,BPM,Battery,Energy,RR(ms)
+    /// (Battery/Energy blanks are treated as 0; RR may be ';' or '|' separated)
     /// </summary>
     public static void MapDashboardAndLogs(this WebApplication app, string logsDir)
     {
@@ -28,41 +33,79 @@ public static class DashboardEndpoints
         app.MapGet("/log.csv", (string file) =>
         {
             var path = SafeLogPath(logsDir, file);
-            if (path is null || !System.IO.File.Exists(path)) return Results.NotFound();
-            var bytes = System.IO.File.ReadAllBytes(path);
+            if (path is null || !File.Exists(path)) return Results.NotFound();
+            var bytes = File.ReadAllBytes(path);
             return Results.File(bytes, "text/csv", Path.GetFileName(path));
         });
 
-        // Read CSV -> JSON rows
+        // Read CSV -> JSON rows (tolerant, supports open files)
         app.MapGet("/log.json", (string file) =>
         {
             var path = SafeLogPath(logsDir, file);
-            if (path is null || !System.IO.File.Exists(path)) return Results.NotFound();
+            if (path is null || !File.Exists(path)) return Results.NotFound();
 
-            var rows = new List<object>(4096);
-            foreach (var line in System.IO.File.ReadLines(path).Skip(1)) // skip header
+            try
             {
-                if (string.IsNullOrWhiteSpace(line)) continue;
-                var parts = line.Split(',');
-                if (parts.Length < 5) continue;
-                if (!DateTimeOffset.TryParse(parts[0], out var ts)) continue;
-                if (!int.TryParse(parts[1], out var bpm)) continue;
-                int? batt = int.TryParse(parts[2], out var b) ? b : null;
-                int? energy = int.TryParse(parts[3], out var en) ? en : null;
-                var rr = parts[4].Split(';', StringSplitOptions.RemoveEmptyEntries)
-                                .Select(x => int.TryParse(x, out var n) ? n : (int?)null)
-                                .Where(x => x.HasValue).Select(x => x!.Value).ToArray();
-                rows.Add(new { ts, bpm, battery = batt, energy, rr });
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var sr = new StreamReader(fs, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+
+                // Read header
+                var header = sr.ReadLine();
+                if (string.IsNullOrWhiteSpace(header))
+                    return Results.Json(Array.Empty<object>());
+
+                var cols = header.Split(',');
+                var idxTs     = FindCol(cols, "TimestampUTC");
+                var idxBpm    = FindCol(cols, "BPM");
+                var idxBatt   = FindCol(cols, "Battery");
+                var idxEnergy = FindCol(cols, "Energy");
+                var idxRR     = FindCol(cols, "RR(ms)");
+
+                if (idxTs < 0 || idxBpm < 0)
+                    return Results.Json(Array.Empty<object>());
+
+                var rows = new List<object>(4096);
+                string? line;
+                while ((line = sr.ReadLine()) != null)
+                {
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+                    var parts = line.Split(',');
+
+                    // Timestamp + BPM are required
+                    if (!TryRead(parts, idxTs, out DateTimeOffset ts)) continue;
+                    if (!TryRead(parts, idxBpm, out int bpm)) continue;
+
+                    // Battery/Energy are optional (default 0 if blank)
+                    TryRead(parts, idxBatt, out int battery, defaultValue: 0);
+                    TryRead(parts, idxEnergy, out int energy, defaultValue: 0);
+
+                    // RR list optional; supports ';' or '|'
+                    int[] rr = Array.Empty<int>();
+                    if (idxRR >= 0 && idxRR < parts.Length && !string.IsNullOrWhiteSpace(parts[idxRR]))
+                    {
+                        var raw = parts[idxRR].Replace('|', ';');
+                        rr = raw.Split(';', StringSplitOptions.RemoveEmptyEntries)
+                                .Select(s => int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : (int?)null)
+                                .Where(v => v.HasValue).Select(v => v!.Value).ToArray();
+                    }
+
+                    rows.Add(new { ts, bpm, battery, energy, rr });
+                }
+
+                return Results.Json(rows);
             }
-            return Results.Json(rows);
+            catch
+            {
+                return Results.StatusCode(500);
+            }
         });
 
         // Delete CSV (POST)
         app.MapPost("/logs/delete", (string file) =>
         {
             var path = SafeLogPath(logsDir, file);
-            if (path is null || !System.IO.File.Exists(path)) return Results.NotFound();
-            try { System.IO.File.Delete(path); }
+            if (path is null || !File.Exists(path)) return Results.NotFound();
+            try { File.Delete(path); }
             catch { return Results.StatusCode(500); }
             return Results.Ok(new { deleted = Path.GetFileName(path) });
         });
@@ -178,6 +221,28 @@ loadList().then(loadData);
 </html>";
             return Results.Text(html, "text/html; charset=utf-8");
         });
+    }
+
+    private static int FindCol(string[] cols, string name)
+    {
+        for (int i = 0; i < cols.Length; i++)
+            if (cols[i].Trim().Equals(name, StringComparison.OrdinalIgnoreCase))
+                return i;
+        return -1;
+    }
+
+    private static bool TryRead(string[] parts, int index, out int value, int defaultValue = 0)
+    {
+        if (index >= 0 && index < parts.Length && int.TryParse(parts[index], NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+        { value = v; return true; }
+        value = defaultValue; return false;
+    }
+
+    private static bool TryRead(string[] parts, int index, out DateTimeOffset value)
+    {
+        if (index >= 0 && index < parts.Length && DateTimeOffset.TryParse(parts[index], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var v))
+        { value = v; return true; }
+        value = default; return false;
     }
 
     private static string? SafeLogPath(string logsDir, string file)

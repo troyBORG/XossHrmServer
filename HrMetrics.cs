@@ -213,4 +213,83 @@ public static class HrMetrics
             if (e.Current != first) return false;
         return true;
     }
+
+    // --- Optional CSV logging support ---
+    private static StreamWriter? _logWriter;
+    private static Timer? _flushTimer;
+
+    public static void EnableLogging(string logDir = "logs", int flushIntervalSeconds = 5)
+    {
+        Directory.CreateDirectory(logDir);
+        string filename = $"session_{DateTime.UtcNow:yyyy-MM-dd_HH-mm-ss}.csv";
+        string path = Path.Combine(logDir, filename);
+
+        _logWriter = new StreamWriter(path, append: false);
+        _logWriter.WriteLine("TimestampUTC,BPM,Battery,Energy,RR(ms)");
+
+        _flushTimer = new Timer(_ =>
+        {
+            try { _logWriter?.Flush(); } catch { }
+        }, null, TimeSpan.FromSeconds(flushIntervalSeconds), TimeSpan.FromSeconds(flushIntervalSeconds));
+
+        Console.WriteLine($"[LOG] Writing HRM data to {path}");
+    }
+
+    public static void PushSample(
+        DateTimeOffset ts,
+        int bpm,
+        IReadOnlyList<int>? rrMs = null,
+        int? battery = null,
+        int? energy = null)
+    {
+        // Push to rolling queues (used by /stats, /history)
+        PushSampleInternal(ts, bpm, rrMs, battery, energy);
+
+        // CSV logging if enabled
+        if (_logWriter != null)
+        {
+            string rrStr = rrMs is { Count: > 0 } ? string.Join(';', rrMs) : "";
+            try
+            {
+                // Write Energy before RR; RR values are semicolon-separated
+                _logWriter.WriteLine($"{ts:O},{bpm},{battery},{energy},{rrStr}");
+            }
+            catch { }
+        }
+    }
+
+    // Keep internal version for analytics
+    private static void PushSampleInternal(
+        DateTimeOffset ts,
+        int bpm,
+        IReadOnlyList<int>? rrMs,
+        int? battery,
+        int? energy)
+    {
+        _bpmQ.Enqueue((ts, bpm));
+
+        // prune old BPM samples (single-pass)
+        var cutoff = ts.AddSeconds(-Math.Max(65, _defaultWindowSecs + 5));
+        lock (_pruneLock)
+        {
+            while (_bpmQ.TryPeek(out var head) && head.ts < cutoff)
+                _bpmQ.TryDequeue(out _);
+        }
+
+        // record RR (real if provided, else estimate from BPM)
+        if (rrMs is { Count: > 0 })
+        {
+            foreach (var rr in rrMs)
+                _rrQ.Enqueue((ts, rr));
+        }
+        else
+        {
+            var est = (int)Math.Round(60000.0 / Math.Max(1, bpm));
+            _rrQ.Enqueue((ts, est));
+        }
+
+        // prune old RR
+        while (_rrQ.TryPeek(out var rhead) && rhead.ts < cutoff)
+            _rrQ.TryDequeue(out _);
+    }
 }

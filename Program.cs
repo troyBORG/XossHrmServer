@@ -4,6 +4,8 @@ using System.Text;
 using System.Text.Json;
 using InTheHand.Bluetooth;
 
+using XossHrmServer; // for HrMetrics
+
 var desiredNameToken = (Environment.GetEnvironmentVariable("HRM_DEVICE_NAME") ?? "XOSS").Trim();
 var httpPort = int.TryParse(Environment.GetEnvironmentVariable("PORT"), out var p) ? p : 5279;
 
@@ -58,6 +60,11 @@ app.MapGet("/", () =>
 );
 
 app.MapGet("/latest", () => latest is null ? Results.NoContent() : Results.Json(latest));
+
+HrMetrics.MapEndpoints(app, defaultWindowSecs: 60); // enables /stats and /history
+app.MapDashboardAndLogs("logs");                    // enables /dashboard and /logs
+HrMetrics.EnableLogging("logs", flushIntervalSeconds: 5);
+
 
 // new /bpm endpoint with padded values
 app.MapGet("/bpm", () =>
@@ -191,6 +198,8 @@ async Task BleWorkerAsync(CancellationToken cancel)
                     rr: reading.RRIntervals,
                     energy: reading.EnergyExpended
                 );
+
+                HrMetrics.PushSample(now, reading.Bpm, reading.RRIntervals, batteryPct, reading.EnergyExpended);
 
                 var payload = new
                 {
