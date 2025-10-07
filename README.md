@@ -1,5 +1,4 @@
-# <img src="app_icon_64.png" alt="XossHrmServer Icon" width="48" align="center" /> XossHrmServer
-
+# <img src="app_icon_64.png" alt="XossHrmServer Icon" width="48" align="center" /> XossHrmServer  
 
 [![.NET 9](https://img.shields.io/badge/.NET-9.0-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-green)](#)
@@ -11,11 +10,15 @@ Streams real-time BPM data via WebSocket and JSON.
 ---
 
 ## 🧩 Features
-- Connects automatically to your **XOSS X1** or other Bluetooth LE heart-rate monitors.
+- Connects automatically to your **XOSS X1** or other Bluetooth LE heart-rate monitors.  
 - Outputs live BPM readings to:
   - **WebSocket:** `ws://localhost:5279/ws`
   - **HTTP JSON endpoint:** `http://localhost:5279/latest`
-- Cross-platform — Windows, Linux, macOS (.NET 9 auto-selects the right target).
+  - **Rolling Stats:** `http://localhost:5279/stats`
+  - **Session History:** `http://localhost:5279/history`
+  - **HTML Dashboard:** `http://localhost:5279/dashboard`
+  - **Log Browser / CSV:** `http://localhost:5279/logs`
+- Cross-platform — Windows, Linux, macOS (.NET 9 auto-selects the right target).  
 - Shows live console output for debugging and verification.
 
 ---
@@ -29,7 +32,6 @@ Streams real-time BPM data via WebSocket and JSON.
 
 ## 🚀 Run
 Clone and run directly:
-
 ```bash
 git clone https://github.com/troyBORG/XossHrmServer.git
 cd XossHrmServer
@@ -43,8 +45,7 @@ on Linux/macOS it uses `net9.0`.
 
 ## 🖥️ Example Console Output
 When running successfully, you should see something like this:
-
-```
+```bash
 dotnet run
 Using launch settings from T:\git\XossHrmServer\Properties\launchSettings.json...
 Building...
@@ -70,15 +71,12 @@ info: Microsoft.Hosting.Lifetime[0]
 
 ---
 
-## 🌐 API Example
-Once readings are flowing, open your browser to:
+## 🌐 API Examples
 
+### 🔹 Latest Reading
 ```
 http://localhost:5279/latest
 ```
-
-Example JSON response:
-
 ```json
 {
   "device": "XOSS_HRM_0376102",
@@ -89,6 +87,45 @@ Example JSON response:
   "energy": null
 }
 ```
+
+### 🔹 Rolling Stats
+```
+http://localhost:5279/stats
+```
+```json
+{
+  "from":"2025-10-06T18:20:01.120Z",
+  "to":"2025-10-06T18:21:01.987Z",
+  "count":58,
+  "bpmAvg":77.41,
+  "bpmMin":69,
+  "bpmMax":83,
+  "stdDev":3.92,
+  "ratePerSec":0.012,
+  "ratePer5Sec":-0.066,
+  "zScore":-0.51,
+  "rmssd":null,
+  "sdnn":null
+}
+```
+
+### 🔹 Session History
+```
+http://localhost:5279/history
+```
+Returns the full set of per-minute aggregated readings in JSON.
+
+### 🔹 Dashboard View
+```
+http://localhost:5279/dashboard
+```
+Interactive HTML chart displaying live and historical BPM data.
+
+### 🔹 Logs Directory
+```
+http://localhost:5279/logs
+```
+Lists all saved CSV sessions (when logging is enabled).
 
 ---
 
@@ -103,7 +140,8 @@ Example JSON response:
 ## 🔧 Notes
 - Uses [InTheHand.BluetoothLE](https://www.nuget.org/packages/InTheHand.BluetoothLE) for cross-platform BLE support.  
 - `/latest` returns **204 No Content** until the first BPM packet is received.  
-- `/ws` provides a live WebSocket telemetry stream.
+- `/ws` provides a live WebSocket telemetry stream.  
+- `/stats`, `/history`, and `/dashboard` provide rolling analytics and CSV logging.
 
 ---
 
