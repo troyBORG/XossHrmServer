@@ -167,61 +167,74 @@ async Task BleWorkerAsync(CancellationToken cancel)
                     var bc = await bs.GetCharacteristicAsync(BattChr);
                     if (bc is not null)
                     {
+                        // Initial read
                         var bv = await bc.ReadValueAsync();
-                        if (bv is { Length: > 0 }) batteryPct = bv[0];
+                        if (bv is { Length: > 0 })
+                        {
+                            batteryPct = bv[0];
+                            if (latest is not null) latest = latest with { battery = batteryPct };
+                            Console.WriteLine($"[BLE] Battery initial: {batteryPct}%");
+                        }
 
-                        // --- NEW: try to keep battery updated while connected ---
-
-                        // 1) Prefer notifications if supported
+                        // Try notifications (best-effort; some devices never fire)
                         try
                         {
                             bc.CharacteristicValueChanged += async (_, be) =>
                             {
                                 if (be.Value is { Length: > 0 })
                                 {
-                                    batteryPct = be.Value[0];
-                                    if (latest is not null) latest = latest with { battery = batteryPct };
-                                    await BroadcastAsync(new
+                                    var newPct = (int)be.Value[0];
+                                    if (newPct != batteryPct)
                                     {
-                                        type = "battery",
-                                        battery = $"{(batteryPct ?? 0),3}",
-                                        device = target.Name
-                                    });
+                                        batteryPct = newPct;
+                                        if (latest is not null) latest = latest with { battery = batteryPct };
+                                        Console.WriteLine($"[BLE] Battery notify: {batteryPct}%");
+                                        await BroadcastAsync(new
+                                        {
+                                            type = "battery",
+                                            battery = $"{(batteryPct ?? 0),3}",
+                                            device = target.Name
+                                        });
+                                    }
                                 }
                             };
                             await bc.StartNotificationsAsync();
                         }
                         catch
                         {
-                            // 2) Fallback: poll every 60s
-                            _ = Task.Run(async () =>
+                            // ignore (stack may throw if notify unsupported)
+                        }
+
+                        // ALWAYS run a gentle poll as a safety net (covers “silent notify” devices)
+                        _ = Task.Run(async () =>
+                        {
+                            while (!cancel.IsCancellationRequested && gatt.IsConnected)
                             {
-                                while (!cancel.IsCancellationRequested && gatt.IsConnected)
+                                try
                                 {
-                                    try
+                                    var vb2 = await bc.ReadValueAsync();
+                                    if (vb2 is { Length: > 0 })
                                     {
-                                        var vb = await bc.ReadValueAsync();
-                                        if (vb is { Length: > 0 })
+                                        var newPct = (int)vb2[0];
+                                        if (newPct != batteryPct)
                                         {
-                                            var newPct = (int)vb[0];
-                                            if (batteryPct != newPct)
+                                            batteryPct = newPct;
+                                            if (latest is not null) latest = latest with { battery = batteryPct };
+                                            Console.WriteLine($"[BLE] Battery poll: {batteryPct}%");
+                                            await BroadcastAsync(new
                                             {
-                                                batteryPct = newPct;
-                                                if (latest is not null) latest = latest with { battery = batteryPct };
-                                                await BroadcastAsync(new
-                                                {
-                                                    type = "battery",
-                                                    battery = $"{(batteryPct ?? 0),3}",
-                                                    device = target.Name
-                                                });
-                                            }
+                                                type = "battery",
+                                                battery = $"{(batteryPct ?? 0),3}",
+                                                device = target.Name
+                                            });
                                         }
                                     }
-                                    catch { /* ignore transient read errors */ }
-                                    await Task.Delay(TimeSpan.FromSeconds(60), cancel);
                                 }
-                            }, cancel);
-                        }
+                                catch { /* transient read failures are fine */ }
+
+                                await Task.Delay(TimeSpan.FromSeconds(60), cancel);
+                            }
+                        }, cancel);
                     }
                 }
             }
