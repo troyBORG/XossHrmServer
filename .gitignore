@@ -29,3 +29,11 @@ Thumbs.db
 
 # Local configuration (not needed in repo)
 launchSettings.json
+
+# Local publish builds
+/publish/
+publish/
+*.zip
+
+# Local build scripts
+build_publish.ps1
