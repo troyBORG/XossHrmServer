@@ -4,18 +4,16 @@ using System.Text;
 using System.Text.Json;
 using InTheHand.Bluetooth;
 
-using XossHrmServer; // for HrMetrics
+using XossHrmServer;
 
 var desiredNameToken = (Environment.GetEnvironmentVariable("HRM_DEVICE_NAME") ?? "XOSS").Trim();
 var httpPort = int.TryParse(Environment.GetEnvironmentVariable("PORT"), out var p) ? p : 5279;
 
-// UUIDs
 var HrsService = BluetoothUuid.FromShortId(0x180D);
 var HrmChar = BluetoothUuid.FromShortId(0x2A37);
 var BattSrv = BluetoothUuid.FromShortId(0x180F);
 var BattChr = BluetoothUuid.FromShortId(0x2A19);
 
-// -------------- Web host / WS --------------
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseUrls($"http://0.0.0.0:{httpPort}");
 var app = builder.Build();
@@ -24,6 +22,11 @@ var sockets = new ConcurrentDictionary<Guid, WebSocket>();
 app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
 
 LatestHr? latest = null;
+
+BluetoothDevice? _activeDev = null;
+string? _activeId = null;
+bool _subscribed = false;
+bool AllowZeroBpm = (Environment.GetEnvironmentVariable("ALLOW_ZERO_BPM") ?? "false").Equals("true", StringComparison.OrdinalIgnoreCase);
 
 app.Map("/ws", async ctx =>
 {
@@ -61,26 +64,17 @@ app.MapGet("/", () =>
 
 app.MapGet("/latest", () => latest is null ? Results.NoContent() : Results.Json(latest));
 
-HrMetrics.MapEndpoints(app, defaultWindowSecs: 60); // enables /stats and /history
-app.MapDashboardAndLogs("logs");                    // enables /dashboard and /logs
+HrMetrics.MapEndpoints(app, defaultWindowSecs: 60);
+app.MapDashboardAndLogs("logs");
 HrMetrics.EnableLogging("logs", flushIntervalSeconds: 5);
 
-
-// new /bpm endpoint with padded values
 app.MapGet("/bpm", () =>
 {
     if (latest == null)
         return Results.NoContent();
-
     string bpmPadded = $"{latest.bpm,3}";
     string batteryPadded = $"{(latest.battery ?? 0),3}";
-
-
-    return Results.Json(new
-    {
-        bpm = bpmPadded,
-        battery = batteryPadded
-    });
+    return Results.Json(new { bpm = bpmPadded, battery = batteryPadded });
 });
 
 var cts = new CancellationTokenSource();
@@ -91,8 +85,6 @@ await app.RunAsync();
 cts.Cancel();
 try { await bleTask; } catch (TaskCanceledException) { }
 
-
-// safer startup with port retry
 try
 {
     await app.RunAsync();
@@ -106,7 +98,6 @@ catch (IOException)
     await appRetry.RunAsync();
 }
 
-// -------------- BLE worker --------------
 async Task BleWorkerAsync(CancellationToken cancel)
 {
     Console.WriteLine("[BLE] Worker starting… token: " + desiredNameToken);
@@ -119,6 +110,12 @@ async Task BleWorkerAsync(CancellationToken cancel)
             {
                 Console.WriteLine("[BLE] Bluetooth unavailable. Retrying in 5s…");
                 await Task.Delay(5000, cancel);
+                continue;
+            }
+
+            if (_activeDev?.Gatt?.IsConnected == true && _subscribed)
+            {
+                await Task.Delay(500, cancel);
                 continue;
             }
 
@@ -136,6 +133,12 @@ async Task BleWorkerAsync(CancellationToken cancel)
             {
                 Console.WriteLine("[BLE] No matching device found. Retrying in 2s…");
                 await Task.Delay(2000, cancel);
+                continue;
+            }
+
+            if (_activeId == target.Id && _activeDev?.Gatt?.IsConnected == true && _subscribed)
+            {
+                await Task.Delay(1000, cancel);
                 continue;
             }
 
@@ -167,7 +170,6 @@ async Task BleWorkerAsync(CancellationToken cancel)
                     var bc = await bs.GetCharacteristicAsync(BattChr);
                     if (bc is not null)
                     {
-                        // Initial read
                         var bv = await bc.ReadValueAsync();
                         if (bv is { Length: > 0 })
                         {
@@ -175,8 +177,6 @@ async Task BleWorkerAsync(CancellationToken cancel)
                             if (latest is not null) latest = latest with { battery = batteryPct };
                             Console.WriteLine($"[BLE] Battery initial: {batteryPct}%");
                         }
-
-                        // Try notifications (best-effort; some devices never fire)
                         try
                         {
                             bc.CharacteristicValueChanged += async (_, be) =>
@@ -200,12 +200,8 @@ async Task BleWorkerAsync(CancellationToken cancel)
                             };
                             await bc.StartNotificationsAsync();
                         }
-                        catch
-                        {
-                            // ignore (stack may throw if notify unsupported)
-                        }
+                        catch { }
 
-                        // ALWAYS run a gentle poll as a safety net (covers “silent notify” devices)
                         _ = Task.Run(async () =>
                         {
                             while (!cancel.IsCancellationRequested && gatt.IsConnected)
@@ -230,16 +226,14 @@ async Task BleWorkerAsync(CancellationToken cancel)
                                         }
                                     }
                                 }
-                                catch { /* transient read failures are fine */ }
-
+                                catch { }
                                 await Task.Delay(TimeSpan.FromSeconds(60), cancel);
                             }
                         }, cancel);
                     }
                 }
             }
-catch { }
-
+            catch { }
 
             var hrm = await hrs.GetCharacteristicAsync(HrmChar);
             if (hrm is null)
@@ -250,11 +244,17 @@ catch { }
                 continue;
             }
 
+            _activeDev = target;
+            _activeId = target.Id;
+            _subscribed = false;
+
             Console.WriteLine("[BLE] Subscribing to HR notifications…");
             hrm.CharacteristicValueChanged += async (_, e) =>
             {
                 if (e.Value is null || e.Value.Length == 0) return;
                 var reading = HeartRateParser.Parse(e.Value);
+                if (!AllowZeroBpm && reading.Bpm == 0) return;
+
                 var now = DateTimeOffset.UtcNow;
 
                 latest = new LatestHr(
@@ -273,7 +273,6 @@ catch { }
                     type = "hr",
                     bpm = $"{reading.Bpm,3}",
                     battery = $"{(batteryPct ?? 0),3}",
-
                     device = target.Name
                 };
                 await BroadcastAsync(payload);
@@ -282,11 +281,15 @@ catch { }
             };
 
             await hrm.StartNotificationsAsync();
+            _subscribed = true;
 
             while (!cancel.IsCancellationRequested && gatt.IsConnected)
                 await Task.Delay(500, cancel);
 
             Console.WriteLine("[BLE] Disconnected.");
+            _subscribed = false;
+            _activeDev = null;
+            _activeId = null;
             await Task.Delay(1000, cancel);
         }
         catch (OperationCanceledException) { }
