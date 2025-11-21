@@ -10,13 +10,7 @@ using XossHrmServer;
 var desiredNameToken = (Environment.GetEnvironmentVariable("HRM_DEVICE_NAME") ?? "XOSS").Trim();
 var httpPort = int.TryParse(Environment.GetEnvironmentVariable("PORT"), out var p) ? p : 5279;
 
-var builder = WebApplication.CreateBuilder(args);
-builder.WebHost.UseUrls($"http://0.0.0.0:{httpPort}");
-var app = builder.Build();
-
 var sockets = new ConcurrentDictionary<Guid, WebSocket>();
-app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
-
 LatestHr? latest = null;
 
 BluetoothDevice? _activeDev = null;
@@ -24,54 +18,64 @@ string? _activeId = null;
 bool _subscribed = false;
 bool AllowZeroBpm = (Environment.GetEnvironmentVariable("ALLOW_ZERO_BPM") ?? "false").Equals("true", StringComparison.OrdinalIgnoreCase);
 
-app.Map("/ws", async ctx =>
+void ConfigureApp(WebApplication app)
 {
-    if (!ctx.WebSockets.IsWebSocketRequest)
+    app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
+
+    app.Map("/ws", async ctx =>
     {
-        ctx.Response.StatusCode = 400;
-        return;
-    }
+        if (!ctx.WebSockets.IsWebSocketRequest)
+        {
+            ctx.Response.StatusCode = 400;
+            return;
+        }
 
-    using var ws = await ctx.WebSockets.AcceptWebSocketAsync();
-    var id = Guid.NewGuid();
-    sockets[id] = ws;
-    try
+        using var ws = await ctx.WebSockets.AcceptWebSocketAsync();
+        var id = Guid.NewGuid();
+        sockets[id] = ws;
+        try
+        {
+            while (ws.State == WebSocketState.Open)
+                await Task.Delay(1000, ctx.RequestAborted);
+        }
+        finally
+        {
+            sockets.TryRemove(id, out _);
+            try { await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", default); } catch { }
+        }
+    });
+
+    app.MapGet("/", () =>
+        Results.Json(new
+        {
+            ok = true,
+            ws = "/ws",
+            port = httpPort,
+            mode = "scan+auto-connect",
+            match = $"name contains '{desiredNameToken}'"
+        })
+    );
+
+    app.MapGet("/latest", () => latest is null ? Results.NoContent() : Results.Json(latest));
+
+    HrMetrics.MapEndpoints(app, defaultWindowSecs: 60);
+    app.MapDashboardAndLogs("logs");
+    HrMetrics.EnableLogging("logs", flushIntervalSeconds: 5);
+
+    app.MapGet("/bpm", () =>
     {
-        while (ws.State == WebSocketState.Open)
-            await Task.Delay(1000, ctx.RequestAborted);
-    }
-    finally
-    {
-        sockets.TryRemove(id, out _);
-        try { await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", default); } catch { }
-    }
-});
+        if (latest == null)
+            return Results.NoContent();
+        string bpmPadded = $"{latest.bpm,3}";
+        string batteryPadded = $"{(latest.battery ?? 0),3}";
+        return Results.Json(new { bpm = bpmPadded, battery = batteryPadded });
+    });
+}
 
-app.MapGet("/", () =>
-    Results.Json(new
-    {
-        ok = true,
-        ws = "/ws",
-        port = httpPort,
-        mode = "scan+auto-connect",
-        match = $"name contains '{desiredNameToken}'"
-    })
-);
-
-app.MapGet("/latest", () => latest is null ? Results.NoContent() : Results.Json(latest));
-
-HrMetrics.MapEndpoints(app, defaultWindowSecs: 60);
-app.MapDashboardAndLogs("logs");
-HrMetrics.EnableLogging("logs", flushIntervalSeconds: 5);
-
-app.MapGet("/bpm", () =>
-{
-    if (latest == null)
-        return Results.NoContent();
-    string bpmPadded = $"{latest.bpm,3}";
-    string batteryPadded = $"{(latest.battery ?? 0),3}";
-    return Results.Json(new { bpm = bpmPadded, battery = batteryPadded });
-});
+var builder = WebApplication.CreateBuilder(args);
+builder.WebHost.UseUrls($"http://0.0.0.0:{httpPort}");
+var app = builder.Build();
+ConfigureApp(app);
 
 var cts = new CancellationTokenSource();
 var isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
@@ -104,6 +108,11 @@ catch (IOException)
     Console.WriteLine($"[HTTP] Port in use; retrying on {httpPort} …");
     builder.WebHost.UseUrls($"http://0.0.0.0:{httpPort}");
     var appRetry = builder.Build();
+    ConfigureApp(appRetry);
+    if (bleTask != null)
+    {
+        appRetry.Lifetime.ApplicationStopping.Register(() => cts.Cancel());
+    }
     await appRetry.RunAsync();
 }
 finally
