@@ -2,17 +2,34 @@
   <PropertyGroup>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <ApplicationIcon>app_icon.ico</ApplicationIcon>
 
+    <!-- Multi-target for cross-platform support: Windows, Linux, macOS -->
+    <!-- InTheHand.BluetoothLE supports all these platforms with appropriate providers -->
+    <TargetFrameworks>net10.0-windows10.0.19041.0;net9.0-windows10.0.19041.0;net10.0;net9.0</TargetFrameworks>
+    
+    <!-- Enable Windows targeting only for Windows TFMs -->
+    <EnableWindowsTargeting Condition="$(TargetFramework.Contains('windows'))">true</EnableWindowsTargeting>
+    <EnableWindowsTargeting Condition="!$(TargetFramework.Contains('windows'))">false</EnableWindowsTargeting>
 
-    <!-- Automatically choose proper TFM -->
-    <TargetFramework Condition="$([MSBuild]::IsOSPlatform('Windows'))">net9.0-windows10.0.19041.0</TargetFramework>
-    <TargetFramework Condition="!$([MSBuild]::IsOSPlatform('Windows'))">net9.0</TargetFramework>
+    <!-- Optional: quiet the preview warning spam during your experiment -->
+    <CheckForOverflowUnderflow>false</CheckForOverflowUnderflow>
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Include BluetoothLE package for all platforms - it provides Linux and macOS providers -->
     <PackageReference Include="InTheHand.BluetoothLE" Version="4.*" />
     <None Include="app_icon.ico" Pack="true" Visible="true" />
   </ItemGroup>
+  
+  <!-- Define platform constants for conditional compilation if needed -->
+  <PropertyGroup Condition="$(TargetFramework.Contains('windows'))">
+    <DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="$(TargetFramework.Contains('macos'))">
+    <DefineConstants>$(DefineConstants);MACOS</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="!$(TargetFramework.Contains('windows')) And !$(TargetFramework.Contains('macos'))">
+    <DefineConstants>$(DefineConstants);LINUX</DefineConstants>
+  </PropertyGroup>
 </Project>
