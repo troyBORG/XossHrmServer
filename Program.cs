@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using InTheHand.Bluetooth;
@@ -9,18 +10,7 @@ using XossHrmServer;
 var desiredNameToken = (Environment.GetEnvironmentVariable("HRM_DEVICE_NAME") ?? "XOSS").Trim();
 var httpPort = int.TryParse(Environment.GetEnvironmentVariable("PORT"), out var p) ? p : 5279;
 
-var HrsService = BluetoothUuid.FromShortId(0x180D);
-var HrmChar = BluetoothUuid.FromShortId(0x2A37);
-var BattSrv = BluetoothUuid.FromShortId(0x180F);
-var BattChr = BluetoothUuid.FromShortId(0x2A19);
-
-var builder = WebApplication.CreateBuilder(args);
-builder.WebHost.UseUrls($"http://0.0.0.0:{httpPort}");
-var app = builder.Build();
-
 var sockets = new ConcurrentDictionary<Guid, WebSocket>();
-app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
-
 LatestHr? latest = null;
 
 BluetoothDevice? _activeDev = null;
@@ -28,62 +18,85 @@ string? _activeId = null;
 bool _subscribed = false;
 bool AllowZeroBpm = (Environment.GetEnvironmentVariable("ALLOW_ZERO_BPM") ?? "false").Equals("true", StringComparison.OrdinalIgnoreCase);
 
-app.Map("/ws", async ctx =>
+void ConfigureApp(WebApplication app)
 {
-    if (!ctx.WebSockets.IsWebSocketRequest)
+    app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
+
+    app.Map("/ws", async ctx =>
     {
-        ctx.Response.StatusCode = 400;
-        return;
-    }
+        if (!ctx.WebSockets.IsWebSocketRequest)
+        {
+            ctx.Response.StatusCode = 400;
+            return;
+        }
 
-    using var ws = await ctx.WebSockets.AcceptWebSocketAsync();
-    var id = Guid.NewGuid();
-    sockets[id] = ws;
-    try
+        using var ws = await ctx.WebSockets.AcceptWebSocketAsync();
+        var id = Guid.NewGuid();
+        sockets[id] = ws;
+        try
+        {
+            while (ws.State == WebSocketState.Open)
+                await Task.Delay(1000, ctx.RequestAborted);
+        }
+        finally
+        {
+            sockets.TryRemove(id, out _);
+            try { await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", default); } catch { }
+        }
+    });
+
+    app.MapGet("/", () =>
+        Results.Json(new
+        {
+            ok = true,
+            ws = "/ws",
+            port = httpPort,
+            mode = "scan+auto-connect",
+            match = $"name contains '{desiredNameToken}'"
+        })
+    );
+
+    app.MapGet("/latest", () => latest is null ? Results.NoContent() : Results.Json(latest));
+
+    HrMetrics.MapEndpoints(app, defaultWindowSecs: 60);
+    app.MapDashboardAndLogs("logs");
+    HrMetrics.EnableLogging("logs", flushIntervalSeconds: 5);
+
+    app.MapGet("/bpm", () =>
     {
-        while (ws.State == WebSocketState.Open)
-            await Task.Delay(1000, ctx.RequestAborted);
-    }
-    finally
-    {
-        sockets.TryRemove(id, out _);
-        try { await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", default); } catch { }
-    }
-});
+        if (latest == null)
+            return Results.NoContent();
+        string bpmPadded = $"{latest.bpm,3}";
+        string batteryPadded = $"{(latest.battery ?? 0),3}";
+        return Results.Json(new { bpm = bpmPadded, battery = batteryPadded });
+    });
+}
 
-app.MapGet("/", () =>
-    Results.Json(new
-    {
-        ok = true,
-        ws = "/ws",
-        port = httpPort,
-        mode = "scan+auto-connect",
-        match = $"name contains '{desiredNameToken}'"
-    })
-);
-
-app.MapGet("/latest", () => latest is null ? Results.NoContent() : Results.Json(latest));
-
-HrMetrics.MapEndpoints(app, defaultWindowSecs: 60);
-app.MapDashboardAndLogs("logs");
-HrMetrics.EnableLogging("logs", flushIntervalSeconds: 5);
-
-app.MapGet("/bpm", () =>
-{
-    if (latest == null)
-        return Results.NoContent();
-    string bpmPadded = $"{latest.bpm,3}";
-    string batteryPadded = $"{(latest.battery ?? 0),3}";
-    return Results.Json(new { bpm = bpmPadded, battery = batteryPadded });
-});
+var builder = WebApplication.CreateBuilder(args);
+builder.WebHost.UseUrls($"http://0.0.0.0:{httpPort}");
+var app = builder.Build();
+ConfigureApp(app);
 
 var cts = new CancellationTokenSource();
-var bleTask = Task.Run(() => BleWorkerAsync(cts.Token));
-app.Lifetime.ApplicationStopping.Register(() => cts.Cancel());
+var isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+var isLinux = RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
+var isMacOS = RuntimeInformation.IsOSPlatform(OSPlatform.OSX);
 
-await app.RunAsync();
-cts.Cancel();
-try { await bleTask; } catch (TaskCanceledException) { }
+// Start BLE worker on all platforms - InTheHand.BluetoothLE provides platform-specific providers
+// Check for environment variable to disable BLE if needed
+var disableBle = (Environment.GetEnvironmentVariable("DOTNET_DISABLE_BLE") ?? "false").Equals("true", StringComparison.OrdinalIgnoreCase);
+
+Task? bleTask = null;
+if (!disableBle)
+{
+    Console.WriteLine($"[BLE] Starting BLE worker on {RuntimeInformation.OSDescription}...");
+    bleTask = Task.Run(() => BleWorkerAsync(cts.Token));
+    app.Lifetime.ApplicationStopping.Register(() => cts.Cancel());
+}
+else
+{
+    Console.WriteLine("[BLE] Bluetooth LE disabled via DOTNET_DISABLE_BLE environment variable. Running in HTTP-only mode.");
+}
 
 try
 {
@@ -95,18 +108,68 @@ catch (IOException)
     Console.WriteLine($"[HTTP] Port in use; retrying on {httpPort} …");
     builder.WebHost.UseUrls($"http://0.0.0.0:{httpPort}");
     var appRetry = builder.Build();
+    ConfigureApp(appRetry);
+    if (bleTask != null)
+    {
+        appRetry.Lifetime.ApplicationStopping.Register(() => cts.Cancel());
+    }
     await appRetry.RunAsync();
+}
+finally
+{
+    cts.Cancel();
+    if (bleTask != null)
+    {
+        try { await bleTask; } catch (TaskCanceledException) { }
+    }
 }
 
 async Task BleWorkerAsync(CancellationToken cancel)
 {
-    Console.WriteLine("[BLE] Worker starting… token: " + desiredNameToken);
+    // Define UUIDs - InTheHand.BluetoothLE provides platform-specific providers
+    var HrsService = BluetoothUuid.FromShortId(0x180D);
+    var HrmChar = BluetoothUuid.FromShortId(0x2A37);
+    var BattSrv = BluetoothUuid.FromShortId(0x180F);
+    var BattChr = BluetoothUuid.FromShortId(0x2A19);
+    
+    Console.WriteLine($"[BLE] Worker starting on {RuntimeInformation.OSDescription}… token: " + desiredNameToken);
 
     while (!cancel.IsCancellationRequested)
     {
         try
         {
-            if (!await Bluetooth.GetAvailabilityAsync())
+            bool available;
+            try
+            {
+                available = await Bluetooth.GetAvailabilityAsync();
+            }
+            catch (DllNotFoundException ex)
+            {
+                Console.WriteLine($"[BLE] Bluetooth library not available on this platform: {ex.Message}");
+                Console.WriteLine("[BLE] Running in HTTP-only mode. BLE functionality disabled.");
+                return;
+            }
+            catch (Exception ex) when (ex.Message.Contains("api-ms-win-core") || 
+                                       ex.Message.Contains("Unable to load shared library") ||
+                                       ex.Message.Contains("BlueZ") ||
+                                       ex.Message.Contains("CoreBluetooth"))
+            {
+                Console.WriteLine($"[BLE] Bluetooth provider error: {ex.Message}");
+                Console.WriteLine("[BLE] This may indicate missing system dependencies:");
+                if (isLinux)
+                {
+                    Console.WriteLine("  - Linux: Ensure BlueZ is installed (sudo apt-get install bluez)");
+                    Console.WriteLine("  - Linux: Ensure you have Bluetooth permissions");
+                }
+                else if (isMacOS)
+                {
+                    Console.WriteLine("  - macOS: Ensure Bluetooth permissions are granted");
+                }
+                Console.WriteLine("[BLE] Running in HTTP-only mode. BLE functionality disabled.");
+                return;
+            }
+
+            if (!available)
             {
                 Console.WriteLine("[BLE] Bluetooth unavailable. Retrying in 5s…");
                 await Task.Delay(5000, cancel);
