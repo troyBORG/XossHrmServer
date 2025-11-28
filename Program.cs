@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using InTheHand.Bluetooth;
+using Microsoft.Extensions.Logging;
 
 using XossHrmServer;
 
@@ -74,6 +75,12 @@ void ConfigureApp(WebApplication app)
 
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseUrls($"http://0.0.0.0:{httpPort}");
+
+// Reduce verbosity of HTTP and routing logs
+builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
+builder.Logging.AddFilter("Microsoft.AspNetCore.Routing.EndpointMiddleware", LogLevel.Warning);
+builder.Logging.AddFilter("Microsoft.AspNetCore.Http.Result", LogLevel.Warning);
+
 var app = builder.Build();
 ConfigureApp(app);
 
@@ -146,6 +153,15 @@ async Task BleWorkerAsync(CancellationToken cancel)
             catch (DllNotFoundException ex)
             {
                 Console.WriteLine($"[BLE] Bluetooth library not available on this platform: {ex.Message}");
+                Console.WriteLine("[BLE] Running in HTTP-only mode. BLE functionality disabled.");
+                return;
+            }
+            catch (Exception ex) when (ex.Message.Contains("No path specified for UNIX transport"))
+            {
+                Console.WriteLine($"[BLE] Error: Wrong framework detected - Linux Bluetooth libraries on Windows!");
+                Console.WriteLine("[BLE] On Windows, you must use the Windows-specific framework.");
+                Console.WriteLine("[BLE] Try: dotnet run -f net9.0-windows10.0.19041.0");
+                Console.WriteLine("[BLE] Or: dotnet run -f net10.0-windows10.0.19041.0");
                 Console.WriteLine("[BLE] Running in HTTP-only mode. BLE functionality disabled.");
                 return;
             }

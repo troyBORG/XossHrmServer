@@ -22,6 +22,22 @@
     <None Include="app_icon.ico" Pack="true" Visible="true" />
   </ItemGroup>
   
+  <!-- Exclude Linux Bluetooth DLLs from Windows builds -->
+  <Target Name="ExcludeLinuxBluetoothFromWindows" AfterTargets="ResolveAssemblyReferences" Condition="$(TargetFramework.Contains('windows'))">
+    <ItemGroup>
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)" Condition="'%(Filename)' == 'Tmds.DBus' OR '%(Filename)' == 'Linux.Bluetooth'" />
+    </ItemGroup>
+  </Target>
+  
+  <!-- Also remove from publish output -->
+  <Target Name="RemoveLinuxBluetoothFromPublish" AfterTargets="Publish" Condition="$(TargetFramework.Contains('windows'))">
+    <ItemGroup>
+      <FilesToDelete Include="$(PublishDir)Tmds.DBus.dll" />
+      <FilesToDelete Include="$(PublishDir)Linux.Bluetooth.dll" />
+    </ItemGroup>
+    <Delete Files="@(FilesToDelete)" ContinueOnError="true" />
+  </Target>
+  
   <!-- Define platform constants for conditional compilation if needed -->
   <PropertyGroup Condition="$(TargetFramework.Contains('windows'))">
     <DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>
