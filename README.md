@@ -1,10 +1,10 @@
 # <img src="app_icon_64.png" alt="XossHrmServer Icon" width="48" align="center" /> XossHrmServer  
 
-[![.NET 9](https://img.shields.io/badge/.NET-9.0-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
+[![.NET 10](https://img.shields.io/badge/.NET-10.0-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-green)](#)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Cross-platform **.NET 9** Bluetooth LE heart-rate monitor server for the [**XOSS X1 Heart Rate Monitor Armband**](https://www.amazon.com/dp/B07H3QN6JC) and compatible BLE HRM devices.  
+Cross-platform **.NET 10** Bluetooth LE heart-rate monitor server for the [**XOSS X1 Heart Rate Monitor Armband**](https://www.amazon.com/dp/B07H3QN6JC) and compatible BLE HRM devices.  
 Streams real-time BPM data via WebSocket and JSON.
 
 ---
@@ -18,13 +18,13 @@ Streams real-time BPM data via WebSocket and JSON.
   - **Session History:** `http://localhost:5279/history`
   - **HTML Dashboard:** `http://localhost:5279/dashboard`
   - **Log Browser / CSV:** `http://localhost:5279/logs`
-- Cross-platform — Windows, Linux, macOS (.NET 9 auto-selects the right target).  
+- Cross-platform — Windows, Linux, macOS (.NET 10 auto-selects the right target).  
 - Shows live console output for debugging and verification.
 
 ---
 
 ## ⚙️ Requirements
-- [.NET 9 SDK](https://dotnet.microsoft.com/download)
+- [.NET 10 SDK](https://dotnet.microsoft.com/download)
 - Bluetooth LE adapter supported by your OS  
   (Windows Bluetooth stack or BlueZ on Linux)
 
@@ -38,8 +38,8 @@ cd XossHrmServer
 dotnet run
 ```
 
-On Windows it automatically targets `net9.0-windows10.0.19041.0`;  
-on Linux/macOS it uses `net9.0`.
+On Windows it automatically targets `net10.0-windows10.0.19041.0`;  
+on Linux/macOS it uses `net10.0`.
 
 ---
 
