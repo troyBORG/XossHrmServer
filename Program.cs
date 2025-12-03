@@ -61,7 +61,6 @@ void ConfigureApp(WebApplication app)
 
     HrMetrics.MapEndpoints(app, defaultWindowSecs: 60);
     app.MapDashboardAndLogs("logs");
-    HrMetrics.EnableLogging("logs", flushIntervalSeconds: 5);
 
     app.MapGet("/bpm", () =>
     {
@@ -72,17 +71,6 @@ void ConfigureApp(WebApplication app)
         return Results.Json(new { bpm = bpmPadded, battery = batteryPadded });
     });
 }
-
-var builder = WebApplication.CreateBuilder(args);
-builder.WebHost.UseUrls($"http://0.0.0.0:{httpPort}");
-
-// Reduce verbosity of HTTP and routing logs
-builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
-builder.Logging.AddFilter("Microsoft.AspNetCore.Routing.EndpointMiddleware", LogLevel.Warning);
-builder.Logging.AddFilter("Microsoft.AspNetCore.Http.Result", LogLevel.Warning);
-
-var app = builder.Build();
-ConfigureApp(app);
 
 var cts = new CancellationTokenSource();
 var isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
@@ -98,37 +86,81 @@ if (!disableBle)
 {
     Console.WriteLine($"[BLE] Starting BLE worker on {RuntimeInformation.OSDescription}...");
     bleTask = Task.Run(() => BleWorkerAsync(cts.Token));
-    app.Lifetime.ApplicationStopping.Register(() => cts.Cancel());
 }
 else
 {
     Console.WriteLine("[BLE] Bluetooth LE disabled via DOTNET_DISABLE_BLE environment variable. Running in HTTP-only mode.");
 }
 
-try
+// Helper to build and configure the app with proper logging filters
+WebApplication BuildApp(int port)
 {
-    await app.RunAsync();
+    var builder = WebApplication.CreateBuilder(args);
+    builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
+
+    // Suppress verbose Microsoft logging (especially on Linux where we don't want ASP.NET noise)
+    builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
+    builder.Logging.AddFilter("Microsoft.AspNetCore.Routing.EndpointMiddleware", LogLevel.Warning);
+    builder.Logging.AddFilter("Microsoft.AspNetCore.Http.Result", LogLevel.Warning);
+    builder.Logging.AddFilter("Microsoft.Extensions.Hosting.Internal.Host", LogLevel.None);
+    builder.Logging.AddFilter("Microsoft.AspNetCore.Server.Kestrel", LogLevel.Error);
+    builder.Logging.AddFilter("Microsoft.Hosting.Lifetime", LogLevel.None);
+
+    var app = builder.Build();
+    ConfigureApp(app);
+    app.Lifetime.ApplicationStopping.Register(() => cts.Cancel());
+    return app;
 }
-catch (IOException)
+
+// Enable CSV logging once (before retry loop so it's not duplicated)
+HrMetrics.EnableLogging("logs", flushIntervalSeconds: 5);
+
+WebApplication? app = null;
+int maxRetries = 10;
+
+for (int attempt = 0; attempt < maxRetries; attempt++)
 {
-    httpPort++;
-    Console.WriteLine($"[HTTP] Port in use; retrying on {httpPort} …");
-    builder.WebHost.UseUrls($"http://0.0.0.0:{httpPort}");
-    var appRetry = builder.Build();
-    ConfigureApp(appRetry);
-    if (bleTask != null)
+    try
     {
-        appRetry.Lifetime.ApplicationStopping.Register(() => cts.Cancel());
+        app = BuildApp(httpPort);
+        await app.StartAsync();
+        Console.WriteLine($"[HTTP] Server running on http://0.0.0.0:{httpPort}");
+        break; // Successfully started
     }
-    await appRetry.RunAsync();
+    catch (IOException ex) when (ex.InnerException is Microsoft.AspNetCore.Connections.AddressInUseException ||
+                                  ex.Message.Contains("address already in use", StringComparison.OrdinalIgnoreCase))
+    {
+        httpPort++;
+        Console.WriteLine($"[HTTP] Port in use; retrying on {httpPort} …");
+        if (app != null)
+        {
+            try { await app.DisposeAsync(); } catch { }
+            app = null;
+        }
+    }
 }
-finally
+
+if (app == null)
 {
-    cts.Cancel();
-    if (bleTask != null)
+    Console.WriteLine($"[HTTP] Failed to bind after {maxRetries} attempts. Exiting.");
+}
+else
+{
+    try
     {
-        try { await bleTask; } catch (TaskCanceledException) { }
+        await app.WaitForShutdownAsync();
     }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[HTTP] Server error: {ex.Message}");
+    }
+}
+
+// Always cleanup: cancel BLE and await its completion
+cts.Cancel();
+if (bleTask != null)
+{
+    try { await bleTask; } catch (OperationCanceledException) { }
 }
 
 async Task BleWorkerAsync(CancellationToken cancel)

@@ -1,7 +1,7 @@
 # <img src="app_icon_64.png" alt="XossHrmServer Icon" width="48" align="center" /> XossHrmServer  
 
 [![.NET 10](https://img.shields.io/badge/.NET-10.0-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-green)](#)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-green)](#)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Cross-platform **.NET 10** Bluetooth LE heart-rate monitor server for the [**XOSS X1 Heart Rate Monitor Armband**](https://www.amazon.com/dp/B07H3QN6JC) and compatible BLE HRM devices.  
@@ -18,7 +18,8 @@ Streams real-time BPM data via WebSocket and JSON.
   - **Session History:** `http://localhost:5279/history`
   - **HTML Dashboard:** `http://localhost:5279/dashboard`
   - **Log Browser / CSV:** `http://localhost:5279/logs`
-- Cross-platform — Windows, Linux, macOS (.NET 10 auto-selects the right target).  
+- Cross-platform — Windows and Linux (.NET 10 auto-selects the right target).
+- Automatic port retry if the default port is in use.  
 - Shows live console output for debugging and verification.
 
 ---
@@ -39,34 +40,39 @@ dotnet run
 ```
 
 On Windows it automatically targets `net10.0-windows10.0.19041.0`;  
-on Linux/macOS it uses `net10.0`.
+on Linux it uses `net10.0`.
 
 ---
 
 ## 🖥️ Example Console Output
 When running successfully, you should see something like this:
 ```bash
-dotnet run
-Using launch settings from T:\git\XossHrmServer\Properties\launchSettings.json...
-Building...
-[BLE] Worker starting… token: XOSS
-info: Microsoft.Hosting.Lifetime[14]
-      Now listening on: http://0.0.0.0:5279
-info: Microsoft.Hosting.Lifetime[0]
-      Application started. Press Ctrl+C to shut down.
-info: Microsoft.Hosting.Lifetime[0]
-      Hosting environment: Development
-info: Microsoft.Hosting.Lifetime[0]
-      Content root path: T:\git\XossHrmServer
+$ dotnet run
+[BLE] Starting BLE worker on Microsoft Windows 11...
+[BLE] Worker starting on Microsoft Windows 11… token: XOSS
+[LOG] Writing HRM data to logs/session_2025-12-03_17-54-30.csv
 [BLE] Scanning for devices…
-[BLE] Connecting to XOSS_HRM_0376102 (D6804BE1E7A1) …
+[HTTP] Server running on http://0.0.0.0:5279
+[BLE] Connecting to XOSS_HRM_0376102 (D6:80:4B:E1:E7:A1) …
+[BLE] Battery initial: 57%
 [BLE] Subscribing to HR notifications…
 [BLE] XOSS_HRM_0376102: 73 bpm
 [BLE] XOSS_HRM_0376102: 69 bpm
 [BLE] XOSS_HRM_0376102: 78 bpm
-[BLE] XOSS_HRM_0376102: 80 bpm
-[BLE] XOSS_HRM_0376102: 79 bpm
-[BLE] XOSS_HRM_0376102: 78 bpm
+```
+
+On Linux:
+```bash
+$ dotnet run -f net10.0
+[BLE] Starting BLE worker on CachyOS...
+[BLE] Worker starting on CachyOS… token: XOSS
+[LOG] Writing HRM data to logs/session_2025-12-03_17-54-30.csv
+[BLE] Scanning for devices…
+[HTTP] Server running on http://0.0.0.0:5279
+[BLE] Connecting to XOSS_HRM_0376102 (D6:80:4B:E1:E7:A1) …
+[BLE] Battery initial: 57%
+[BLE] Subscribing to HR notifications…
+[BLE] XOSS_HRM_0376102: 81 bpm
 ```
 
 ---
@@ -133,15 +139,20 @@ Lists all saved CSV sessions (when logging is enabled).
 | Variable | Default | Description |
 |-----------|----------|-------------|
 | `HRM_DEVICE_NAME` | `XOSS` | Name token to match your HRM device |
-| `PORT` | `5279` | HTTP / WebSocket server port |
+| `PORT` | `5279` | HTTP / WebSocket server port (auto-retries if in use) |
+| `DOTNET_DISABLE_BLE` | `false` | Set to `true` to run in HTTP-only mode |
+| `ALLOW_ZERO_BPM` | `false` | Set to `true` to allow 0 BPM readings |
 
 ---
 
 ## 🔧 Notes
-- Uses [InTheHand.BluetoothLE](https://www.nuget.org/packages/InTheHand.BluetoothLE) for cross-platform BLE support.  
+- Uses [InTheHand.BluetoothLE](https://www.nuget.org/packages/InTheHand.BluetoothLE) for cross-platform BLE support.
+  - **Windows:** Uses WinRT Bluetooth APIs
+  - **Linux:** Uses BlueZ via D-Bus (ensure BlueZ is installed: `sudo pacman -S bluez bluez-utils` or `sudo apt install bluez`)
 - `/latest` returns **204 No Content** until the first BPM packet is received.  
 - `/ws` provides a live WebSocket telemetry stream.  
 - `/stats`, `/history`, and `/dashboard` provide rolling analytics and CSV logging.
+- Session data is automatically logged to CSV files in the `logs/` directory.
 
 ---
 

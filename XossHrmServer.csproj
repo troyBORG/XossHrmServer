@@ -4,8 +4,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationIcon>app_icon.ico</ApplicationIcon>
 
-    <!-- Multi-target for cross-platform support: Windows, Linux, macOS -->
-    <!-- InTheHand.BluetoothLE supports all these platforms with appropriate providers -->
+    <!-- Multi-target for cross-platform support: Windows and Linux -->
+    <!-- InTheHand.BluetoothLE provides platform-specific BLE providers -->
     <TargetFrameworks>net10.0-windows10.0.19041.0;net9.0-windows10.0.19041.0;net10.0;net9.0</TargetFrameworks>
     
     <!-- Enable Windows targeting only for Windows TFMs -->
@@ -17,7 +17,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Include BluetoothLE package for all platforms - it provides Linux and macOS providers -->
+    <!-- InTheHand.BluetoothLE: Windows uses WinRT, Linux uses BlueZ via D-Bus -->
     <PackageReference Include="InTheHand.BluetoothLE" Version="4.*" />
     <None Include="app_icon.ico" Pack="true" Visible="true" />
   </ItemGroup>
@@ -38,14 +38,11 @@
     <Delete Files="@(FilesToDelete)" ContinueOnError="true" />
   </Target>
   
-  <!-- Define platform constants for conditional compilation if needed -->
+  <!-- Define platform constants for conditional compilation -->
   <PropertyGroup Condition="$(TargetFramework.Contains('windows'))">
     <DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>
   </PropertyGroup>
-  <PropertyGroup Condition="$(TargetFramework.Contains('macos'))">
-    <DefineConstants>$(DefineConstants);MACOS</DefineConstants>
-  </PropertyGroup>
-  <PropertyGroup Condition="!$(TargetFramework.Contains('windows')) And !$(TargetFramework.Contains('macos'))">
+  <PropertyGroup Condition="!$(TargetFramework.Contains('windows'))">
     <DefineConstants>$(DefineConstants);LINUX</DefineConstants>
   </PropertyGroup>
 </Project>

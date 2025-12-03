@@ -37,3 +37,4 @@ publish/
 
 # Local build scripts
 build_publish.ps1
+build_publish.sh
