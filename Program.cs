@@ -15,8 +15,11 @@ var sockets = new ConcurrentDictionary<Guid, WebSocket>();
 LatestHr? latest = null;
 
 BluetoothDevice? _activeDev = null;
+int _lastLoggedBpm = -1;
+DateTimeOffset _lastLoggedTime = DateTimeOffset.MinValue;
 string? _activeId = null;
 bool _subscribed = false;
+EventHandler<GattCharacteristicValueChangedEventArgs>? _hrmHandler = null;
 bool AllowZeroBpm = (Environment.GetEnvironmentVariable("ALLOW_ZERO_BPM") ?? "false").Equals("true", StringComparison.OrdinalIgnoreCase);
 
 void ConfigureApp(WebApplication app)
@@ -357,10 +360,25 @@ async Task BleWorkerAsync(CancellationToken cancel)
 
             _activeDev = target;
             _activeId = target.Id;
-            _subscribed = false;
+
+            // Only subscribe if not already subscribed
+            if (_subscribed)
+            {
+                await Task.Delay(500, cancel);
+                continue;
+            }
+
+            // Remove old handler if it exists (prevents duplicate handlers on reconnect)
+            if (_hrmHandler != null)
+            {
+                try { hrm.CharacteristicValueChanged -= _hrmHandler; } catch { }
+                _hrmHandler = null;
+            }
 
             Console.WriteLine("[BLE] Subscribing to HR notifications…");
-            hrm.CharacteristicValueChanged += async (_, e) =>
+            
+            // Create handler and store reference
+            _hrmHandler = async (_, e) =>
             {
                 if (e.Value is null || e.Value.Length == 0) return;
                 var reading = HeartRateParser.Parse(e.Value);
@@ -388,9 +406,16 @@ async Task BleWorkerAsync(CancellationToken cancel)
                 };
                 await BroadcastAsync(payload);
 
-                Console.WriteLine($"[BLE] {target.Name}: {reading.Bpm} bpm");
+                // Only log if BPM changed or it's been more than 0.5 seconds since last log (prevents duplicate logs)
+                if (reading.Bpm != _lastLoggedBpm || (now - _lastLoggedTime).TotalSeconds > 0.5)
+                {
+                    Console.WriteLine($"[BLE] {target.Name}: {reading.Bpm} bpm");
+                    _lastLoggedBpm = reading.Bpm;
+                    _lastLoggedTime = now;
+                }
             };
 
+            hrm.CharacteristicValueChanged += _hrmHandler;
             await hrm.StartNotificationsAsync();
             _subscribed = true;
 
@@ -401,6 +426,7 @@ async Task BleWorkerAsync(CancellationToken cancel)
             _subscribed = false;
             _activeDev = null;
             _activeId = null;
+            _hrmHandler = null; // Clear handler reference on disconnect
             await Task.Delay(1000, cancel);
         }
         catch (OperationCanceledException) { }
