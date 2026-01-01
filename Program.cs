@@ -387,15 +387,29 @@ async Task BleWorkerAsync(CancellationToken cancel)
             catch (Exception ex)
             {
                 Console.WriteLine($"[BLE] ❌ ERROR: Device scan failed: {ex.Message}");
-                Console.WriteLine("[BLE] 💡 TIP: Try turning Bluetooth off and on again. Retrying in 3s...");
+                Console.WriteLine("[BLE] 💡 TIP: Try turning Bluetooth off and on again.");
+                Console.WriteLine("[BLE] 💡 TIP: If your device is connected in system Bluetooth settings, disconnect it first - BLE devices can only connect to one client at a time.");
                 await Task.Delay(3000, cancel);
                 continue;
             }
 
-            if (!string.IsNullOrWhiteSpace(desiredNameToken))
-                target = devices.FirstOrDefault(d => (d?.Name ?? "").Contains(desiredNameToken, StringComparison.OrdinalIgnoreCase));
+            // Log what devices were found for debugging
+            if (devices != null && devices.Count > 0)
+            {
+                Console.WriteLine($"[BLE] Found {devices.Count} device(s):");
+                foreach (var dev in devices)
+                {
+                    Console.WriteLine($"  - {dev?.Name ?? "Unknown"} (ID: {dev?.Id ?? "N/A"})");
+                }
+            }
 
-            target ??= devices.FirstOrDefault(d => !string.IsNullOrWhiteSpace(d?.Name));
+            if (devices != null)
+            {
+                if (!string.IsNullOrWhiteSpace(desiredNameToken))
+                    target = devices.FirstOrDefault(d => (d?.Name ?? "").Contains(desiredNameToken, StringComparison.OrdinalIgnoreCase));
+
+                target ??= devices.FirstOrDefault(d => !string.IsNullOrWhiteSpace(d?.Name));
+            }
 
             if (target is null)
             {
@@ -403,7 +417,15 @@ async Task BleWorkerAsync(CancellationToken cancel)
                 if ((now - _lastNoDeviceLog).TotalSeconds >= ThrottleIntervalSeconds)
                 {
                     Console.WriteLine($"[BLE] ⚠️ No matching device found (looking for name containing '{desiredNameToken}').");
-                    Console.WriteLine("[BLE] 💡 TIP: Make sure your device is on and nearby. Retrying in 3s…");
+                    if (devices != null && devices.Count == 0)
+                    {
+                        Console.WriteLine("[BLE] 💡 No devices found in scan. This might indicate:");
+                        Console.WriteLine("[BLE]    - Device is connected to system Bluetooth (disconnect it first)");
+                        Console.WriteLine("[BLE]    - Device is not advertising/discoverable");
+                        Console.WriteLine("[BLE]    - Bluetooth permissions issue (check with: journalctl -u bluetooth)");
+                    }
+                    Console.WriteLine("[BLE] 💡 TIP: Make sure your device is on and nearby.");
+                    Console.WriteLine("[BLE] 💡 TIP: If the device is connected in system Bluetooth settings, disconnect it first - BLE devices can only connect to one client at a time.");
                     _lastNoDeviceLog = now;
                 }
                 await Task.Delay(3000, cancel);
