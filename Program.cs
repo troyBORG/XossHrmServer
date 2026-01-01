@@ -594,8 +594,9 @@ async Task BleWorkerAsync(CancellationToken cancel)
     if (isLinux)
     {
         await PrepareDeviceOnLinux(desiredNameToken, cancel);
-        // Give Bluetooth stack a moment to settle after any disconnects
-        await Task.Delay(2000, cancel);
+        // Give Bluetooth stack a moment to settle after any disconnects and for device to start advertising
+        Console.WriteLine("[BLE] Waiting for device to become discoverable...");
+        await Task.Delay(3000, cancel);
     }
 
     while (!cancel.IsCancellationRequested)
@@ -680,24 +681,33 @@ async Task BleWorkerAsync(CancellationToken cancel)
             }
 
             Console.WriteLine("[BLE] Scanning for devices…");
+            if (isLinux && !string.IsNullOrWhiteSpace(_knownDeviceMac))
+            {
+                Console.WriteLine($"[BLE] Looking for device: {_knownDeviceMac}");
+            }
             BluetoothDevice? target = null;
 
             IReadOnlyCollection<BluetoothDevice>? devices = null;
             try
             {
+                // Try scanning with a longer timeout on Linux since we know the device exists
+                var scanTimeout = isLinux ? TimeSpan.FromSeconds(20) : TimeSpan.FromSeconds(15);
                 var scanTask = Bluetooth.ScanForDevicesAsync(new RequestDeviceOptions { AcceptAllDevices = true });
-                devices = await WithTimeoutRef(scanTask, TimeSpan.FromSeconds(15), "Bluetooth.ScanForDevicesAsync()", cancel);
+                devices = await WithTimeoutRef(scanTask, scanTimeout, "Bluetooth.ScanForDevicesAsync()", cancel);
                 if (devices == null && !cancel.IsCancellationRequested)
                 {
                     var now = DateTimeOffset.UtcNow;
                     if ((now - _lastScanTimeoutLog).TotalSeconds >= ThrottleIntervalSeconds)
                     {
-                        Console.WriteLine("[BLE] ⚠️ Device scan timed out after 15s. This may indicate Bluetooth issues. Retrying in 3s...");
+                        var timeoutSeconds = isLinux ? 20 : 15;
+                        Console.WriteLine($"[BLE] ⚠️ Device scan timed out after {timeoutSeconds}s. This may indicate Bluetooth issues. Retrying in 3s...");
                         Console.WriteLine("[BLE] 💡 TIP: Try turning the HRM device OFF and ON to make it re-announce/advertise.");
                         Console.WriteLine("[BLE] 💡 TIP: BLE devices must be advertising to be discovered. If it's not advertising, the scan won't find it.");
                         if (isLinux)
                         {
                             Console.WriteLine("[BLE] 💡 TIP: Try restarting Bluetooth service: sudo systemctl restart bluetooth");
+                            Console.WriteLine("[BLE] 💡 TIP: If bluetoothctl can see the device but the app can't, this may be a D-Bus permissions issue.");
+                            Console.WriteLine("[BLE] 💡 TIP: Check D-Bus permissions: journalctl -u bluetooth | tail -20");
                         }
                         _lastScanTimeoutLog = now;
                     }
