@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -27,6 +28,7 @@ DateTimeOffset _lastUnavailableLog = DateTimeOffset.MinValue;
 DateTimeOffset _lastNoDeviceLog = DateTimeOffset.MinValue;
 DateTimeOffset _lastConnectionLostLog = DateTimeOffset.MinValue;
 DateTimeOffset _lastHealthWarningLog = DateTimeOffset.MinValue;
+DateTimeOffset _lastScanTimeoutLog = DateTimeOffset.MinValue;
 const int ThrottleIntervalSeconds = 30; // Only log repeated messages every 30 seconds
 const int ConnectionLostLogIntervalSeconds = 10; // Log connection lost every 10 seconds
 
@@ -82,6 +84,18 @@ void ConfigureApp(WebApplication app)
         return Results.Json(new { bpm = bpmPadded, battery = batteryPadded });
     });
 }
+
+// Get version from assembly
+var assemblyVersion = Assembly.GetExecutingAssembly().GetName().Version;
+var version = assemblyVersion != null 
+    ? $"{assemblyVersion.Major}.{assemblyVersion.Minor}.{assemblyVersion.Build}" 
+    : "1.0.0";
+
+// Welcome message
+Console.WriteLine($"═══════════════════════════════════════════════════════════");
+Console.WriteLine($"  Welcome to XossHrmServer v{version}");
+Console.WriteLine($"═══════════════════════════════════════════════════════════");
+Console.WriteLine();
 
 var cts = new CancellationTokenSource();
 var isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
@@ -186,7 +200,7 @@ static async Task<T?> WithTimeoutRef<T>(Task<T> task, TimeSpan timeout, string o
     }
     catch (OperationCanceledException) when (timeoutCts.Token.IsCancellationRequested && !cancel.IsCancellationRequested)
     {
-        Console.WriteLine($"[BLE] ⚠️ TIMEOUT: {operation} took longer than {timeout.TotalSeconds}s and was cancelled");
+        TimeoutLogger.LogTimeout(operation, timeout);
         return null;
     }
 }
@@ -202,7 +216,7 @@ static async Task<bool> WithTimeoutTask(Task task, TimeSpan timeout, string oper
     }
     catch (OperationCanceledException) when (timeoutCts.Token.IsCancellationRequested && !cancel.IsCancellationRequested)
     {
-        Console.WriteLine($"[BLE] ⚠️ TIMEOUT: {operation} took longer than {timeout.TotalSeconds}s and was cancelled");
+        TimeoutLogger.LogTimeout(operation, timeout);
         return false;
     }
 }
@@ -217,7 +231,7 @@ static async Task<bool?> WithTimeoutBool(Task<bool> task, TimeSpan timeout, stri
     }
     catch (OperationCanceledException) when (timeoutCts.Token.IsCancellationRequested && !cancel.IsCancellationRequested)
     {
-        Console.WriteLine($"[BLE] ⚠️ TIMEOUT: {operation} took longer than {timeout.TotalSeconds}s and was cancelled");
+        TimeoutLogger.LogTimeout(operation, timeout);
         return null;
     }
 }
@@ -359,7 +373,12 @@ async Task BleWorkerAsync(CancellationToken cancel)
                 devices = await WithTimeoutRef(scanTask, TimeSpan.FromSeconds(15), "Bluetooth.ScanForDevicesAsync()", cancel);
                 if (devices == null && !cancel.IsCancellationRequested)
                 {
-                    Console.WriteLine("[BLE] ⚠️ Device scan timed out after 15s. This may indicate Bluetooth issues. Retrying in 3s...");
+                    var now = DateTimeOffset.UtcNow;
+                    if ((now - _lastScanTimeoutLog).TotalSeconds >= ThrottleIntervalSeconds)
+                    {
+                        Console.WriteLine("[BLE] ⚠️ Device scan timed out after 15s. This may indicate Bluetooth issues. Retrying in 3s...");
+                        _lastScanTimeoutLog = now;
+                    }
                     await Task.Delay(3000, cancel);
                     continue;
                 }
@@ -759,6 +778,26 @@ public sealed record LatestHr(
     IReadOnlyList<int> rr,
     int? energy
 );
+
+// Track last timeout log time per operation to throttle messages
+static class TimeoutLogger
+{
+    private static readonly Dictionary<string, DateTimeOffset> _logTimes = new();
+    private static readonly object _lock = new();
+
+    public static void LogTimeout(string operation, TimeSpan timeout)
+    {
+        var now = DateTimeOffset.UtcNow;
+        lock (_lock)
+        {
+            if (!_logTimes.TryGetValue(operation, out var lastLog) || (now - lastLog).TotalSeconds >= 30)
+            {
+                Console.WriteLine($"[BLE] ⚠️ TIMEOUT: {operation} took longer than {timeout.TotalSeconds}s and was cancelled");
+                _logTimes[operation] = now;
+            }
+        }
+    }
+}
 
 static class HeartRateParser
 {
