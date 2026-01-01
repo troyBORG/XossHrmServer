@@ -3,9 +3,9 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationIcon>app_icon.ico</ApplicationIcon>
-    <Version>1.1.6</Version>
-    <AssemblyVersion>1.1.6</AssemblyVersion>
-    <FileVersion>1.1.6</FileVersion>
+    <Version>1.1.6.1</Version>
+    <AssemblyVersion>1.1.6.1</AssemblyVersion>
+    <FileVersion>1.1.6.1</FileVersion>
 
     <!-- Multi-target for cross-platform support: Windows and Linux -->
     <!-- InTheHand.BluetoothLE provides platform-specific BLE providers -->
