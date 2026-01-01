@@ -156,5 +156,29 @@ Lists all saved CSV sessions (when logging is enabled).
 
 ---
 
+## 🐛 Troubleshooting
+
+### Device Not Found / Connection Issues
+
+**BLE devices can only connect to one client at a time.** If your device is connected to system Bluetooth (KDE, Windows Settings, etc.), disconnect it first:
+
+- **Linux (KDE/GNOME):** Disconnect the device in Bluetooth settings, or use `bluetoothctl`:
+  ```bash
+  bluetoothctl
+  disconnect <device_mac>
+  trust <device_mac>  # Optional: mark device as trusted
+  ```
+
+- **Windows:** Disconnect the device in Settings → Bluetooth & devices
+
+- **If scanning still times out:**
+  - Restart Bluetooth service: `sudo systemctl restart bluetooth` (Linux)
+  - Turn Bluetooth off and on again in system settings
+  - Reboot if issues persist
+
+The app includes detailed diagnostics and will show what devices are found during scanning to help troubleshoot connection issues.
+
+---
+
 ## 📄 License
 MIT License © 2025 troyBORG
