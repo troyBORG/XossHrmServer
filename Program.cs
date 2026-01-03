@@ -1,7 +1,5 @@
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Net.WebSockets;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -20,19 +18,9 @@ BluetoothDevice? _activeDev = null;
 int _lastLoggedBpm = -1;
 DateTimeOffset _lastLoggedTime = DateTimeOffset.MinValue;
 string? _activeId = null;
-string? _knownDeviceMac = null; // MAC address found via bluetoothctl (Linux only)
 bool _subscribed = false;
 EventHandler<GattCharacteristicValueChangedEventArgs>? _hrmHandler = null;
 bool AllowZeroBpm = (Environment.GetEnvironmentVariable("ALLOW_ZERO_BPM") ?? "false").Equals("true", StringComparison.OrdinalIgnoreCase);
-
-// Throttling for repeated log messages to prevent spam
-DateTimeOffset _lastUnavailableLog = DateTimeOffset.MinValue;
-DateTimeOffset _lastNoDeviceLog = DateTimeOffset.MinValue;
-DateTimeOffset _lastConnectionLostLog = DateTimeOffset.MinValue;
-DateTimeOffset _lastHealthWarningLog = DateTimeOffset.MinValue;
-DateTimeOffset _lastScanTimeoutLog = DateTimeOffset.MinValue;
-const int ThrottleIntervalSeconds = 30; // Only log repeated messages every 30 seconds
-const int ConnectionLostLogIntervalSeconds = 10; // Log connection lost every 10 seconds
 
 void ConfigureApp(WebApplication app)
 {
@@ -87,32 +75,10 @@ void ConfigureApp(WebApplication app)
     });
 }
 
-// Get version from assembly
-var assemblyVersion = Assembly.GetExecutingAssembly().GetName().Version;
-var version = assemblyVersion != null 
-    ? (assemblyVersion.Revision >= 0 
-        ? $"{assemblyVersion.Major}.{assemblyVersion.Minor}.{assemblyVersion.Build}.{assemblyVersion.Revision}"
-        : $"{assemblyVersion.Major}.{assemblyVersion.Minor}.{assemblyVersion.Build}")
-    : "1.0.0";
-
-// Welcome message
-Console.WriteLine($"═══════════════════════════════════════════════════════════");
-Console.WriteLine($"  Welcome to XossHrmServer v{version}");
-Console.WriteLine($"═══════════════════════════════════════════════════════════");
-Console.WriteLine();
-
 var cts = new CancellationTokenSource();
 var isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
 var isLinux = RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
 var isMacOS = RuntimeInformation.IsOSPlatform(OSPlatform.OSX);
-
-// Handle Ctrl+C to ensure graceful shutdown
-Console.CancelKeyPress += (sender, e) =>
-{
-    e.Cancel = true; // Prevent immediate termination
-    Console.WriteLine("\n[SHUTDOWN] Shutdown requested (Ctrl+C). Shutting down gracefully...");
-    cts.Cancel();
-};
 
 // Start BLE worker on all platforms - InTheHand.BluetoothLE provides platform-specific providers
 // Check for environment variable to disable BLE if needed
@@ -193,391 +159,11 @@ else
     }
 }
 
-// Timeout helper to prevent operations from hanging indefinitely
-static async Task<T?> WithTimeoutRef<T>(Task<T> task, TimeSpan timeout, string operation, CancellationToken cancel = default) where T : class
-{
-    using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancel);
-    timeoutCts.CancelAfter(timeout);
-    try
-    {
-        return await task.WaitAsync(timeoutCts.Token);
-    }
-    catch (OperationCanceledException) when (timeoutCts.Token.IsCancellationRequested && !cancel.IsCancellationRequested)
-    {
-        TimeoutLogger.LogTimeout(operation, timeout);
-        return null;
-    }
-}
-
-static async Task<bool> WithTimeoutTask(Task task, TimeSpan timeout, string operation, CancellationToken cancel = default)
-{
-    using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancel);
-    timeoutCts.CancelAfter(timeout);
-    try
-    {
-        await task.WaitAsync(timeoutCts.Token);
-        return true;
-    }
-    catch (OperationCanceledException) when (timeoutCts.Token.IsCancellationRequested && !cancel.IsCancellationRequested)
-    {
-        TimeoutLogger.LogTimeout(operation, timeout);
-        return false;
-    }
-}
-
-static async Task<bool?> WithTimeoutBool(Task<bool> task, TimeSpan timeout, string operation, CancellationToken cancel = default)
-{
-    using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancel);
-    timeoutCts.CancelAfter(timeout);
-    try
-    {
-        return await task.WaitAsync(timeoutCts.Token);
-    }
-    catch (OperationCanceledException) when (timeoutCts.Token.IsCancellationRequested && !cancel.IsCancellationRequested)
-    {
-        TimeoutLogger.LogTimeout(operation, timeout);
-        return null;
-    }
-}
-
 // Always cleanup: cancel BLE and await its completion
 cts.Cancel();
 if (bleTask != null)
 {
-    Console.WriteLine("[SHUTDOWN] Waiting for BLE worker to stop...");
-    try 
-    { 
-        // Give it a timeout to prevent hanging forever
-        await Task.WhenAny(bleTask, Task.Delay(TimeSpan.FromSeconds(5)));
-        if (!bleTask.IsCompleted)
-        {
-            Console.WriteLine("[SHUTDOWN] ⚠️ BLE worker did not stop within 5s, forcing shutdown...");
-        }
-        else
-        {
-            await bleTask; // Get any exceptions
-        }
-    } 
-    catch (OperationCanceledException) 
-    {
-        Console.WriteLine("[SHUTDOWN] BLE worker stopped.");
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"[SHUTDOWN] BLE worker error during shutdown: {ex.Message}");
-    }
-}
-
-// Clean up active connection
-if (_activeDev != null)
-{
-    Console.WriteLine("[SHUTDOWN] Disconnecting Bluetooth device...");
-    SafeDisconnect(_activeDev);
-}
-Console.WriteLine("[SHUTDOWN] Shutdown complete.");
-
-// Helper to prepare device on Linux using bluetoothctl
-async Task<bool> PrepareDeviceOnLinux(string deviceNameToken, CancellationToken cancel)
-{
-    if (!isLinux) return true; // Only needed on Linux
-    
-    try
-    {
-        Console.WriteLine("[BLE] Checking system Bluetooth connections...");
-        
-        // Get list of devices from bluetoothctl
-        var listProcess = new Process
-        {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = "bluetoothctl",
-                Arguments = "devices",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            }
-        };
-        
-        listProcess.Start();
-        var output = await listProcess.StandardOutput.ReadToEndAsync(cancel);
-        await listProcess.WaitForExitAsync(cancel);
-        
-        // Find device matching our token
-        string? deviceMac = null;
-        foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-        {
-            if (line.Contains(deviceNameToken, StringComparison.OrdinalIgnoreCase))
-            {
-                // Extract MAC address (format: "Device XX:XX:XX:XX:XX:XX DeviceName")
-                var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length >= 2)
-                {
-                    deviceMac = parts[1];
-                    Console.WriteLine($"[BLE] Found device in system Bluetooth: {deviceMac}");
-                    // Store the MAC address for later use
-                    _knownDeviceMac = deviceMac;
-                    break;
-                }
-            }
-        }
-        
-        if (deviceMac == null)
-        {
-            Console.WriteLine("[BLE] Device not found in system Bluetooth (may not be paired). App will scan for it.");
-            return true; // Not an error, just not paired
-        }
-        
-        // Check if device is connected
-        var infoProcess = new Process
-        {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = "bluetoothctl",
-                Arguments = $"info {deviceMac}",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            }
-        };
-        
-        infoProcess.Start();
-        var infoOutput = await infoProcess.StandardOutput.ReadToEndAsync(cancel);
-        await infoProcess.WaitForExitAsync(cancel);
-        
-        bool isConnected = infoOutput.Contains("Connected: yes", StringComparison.OrdinalIgnoreCase);
-        bool isTrusted = infoOutput.Contains("Trusted: yes", StringComparison.OrdinalIgnoreCase);
-        
-        if (isConnected)
-        {
-            Console.WriteLine($"[BLE] Device is connected to system Bluetooth. Disconnecting...");
-            var disconnectProcess = new Process
-            {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = "bluetoothctl",
-                    Arguments = $"disconnect {deviceMac}",
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                }
-            };
-            
-            disconnectProcess.Start();
-            await disconnectProcess.StandardOutput.ReadToEndAsync(cancel);
-            await disconnectProcess.WaitForExitAsync(cancel);
-            await Task.Delay(2000, cancel); // Give it a moment to disconnect
-            Console.WriteLine("[BLE] Device disconnected from system Bluetooth.");
-        }
-        
-        // Try to make the device discoverable/scan for it via bluetoothctl to "wake it up"
-        Console.WriteLine("[BLE] Attempting to discover device via bluetoothctl...");
-        try
-        {
-            var scanProcess = new Process
-            {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = "bluetoothctl",
-                    Arguments = $"scan on",
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                }
-            };
-            
-            var outputBuilder = new StringBuilder();
-            scanProcess.Start();
-            
-            // Read output as it comes
-            var readTask = Task.Run(async () =>
-            {
-                string? line;
-                while ((line = await scanProcess.StandardOutput.ReadLineAsync()) != null)
-                {
-                    outputBuilder.AppendLine(line);
-                    // Check if we see our device
-                    if (line.Contains(deviceMac, StringComparison.OrdinalIgnoreCase))
-                    {
-                        Console.WriteLine($"[BLE] Device detected in bluetoothctl scan: {line.Trim()}");
-                    }
-                }
-            }, cancel);
-            
-            // Let it scan for 5 seconds
-            await Task.Delay(5000, cancel);
-            try { scanProcess.Kill(); } catch { }
-            await readTask;
-            await Task.Delay(500, cancel);
-            
-            // Now try to get info again to see if device is visible
-            var checkProcess = new Process
-            {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = "bluetoothctl",
-                    Arguments = $"info {deviceMac}",
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                }
-            };
-            
-            checkProcess.Start();
-            var checkOutput = await checkProcess.StandardOutput.ReadToEndAsync(cancel);
-            await checkProcess.WaitForExitAsync(cancel);
-            
-            if (checkOutput.Contains("RSSI:", StringComparison.OrdinalIgnoreCase))
-            {
-                Console.WriteLine("[BLE] ✓ Device is visible via bluetoothctl (has RSSI). Ready for app scan.");
-            }
-            else if (outputBuilder.ToString().Contains(deviceMac, StringComparison.OrdinalIgnoreCase))
-            {
-                Console.WriteLine("[BLE] ✓ Device was seen in scan. Ready for app scan.");
-            }
-            else
-            {
-                Console.WriteLine("[BLE] ⚠️ Device may not be advertising. Try turning the device off and on.");
-                Console.WriteLine("[BLE] 💡 The device needs to be actively advertising for the app to discover it.");
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[BLE] ⚠️ Could not scan via bluetoothctl: {ex.Message}");
-        }
-        
-        if (!isTrusted)
-        {
-            Console.WriteLine($"[BLE] Marking device as trusted...");
-            var trustProcess = new Process
-            {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = "bluetoothctl",
-                    Arguments = $"trust {deviceMac}",
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                }
-            };
-            
-            trustProcess.Start();
-            await trustProcess.StandardOutput.ReadToEndAsync(cancel);
-            await trustProcess.WaitForExitAsync(cancel);
-            Console.WriteLine("[BLE] Device marked as trusted.");
-        }
-        
-        // Try connecting and immediately disconnecting via bluetoothctl to "wake up" the device
-        // This helps ensure the device is in a ready state for the library to connect
-        if (!isConnected)
-        {
-            Console.WriteLine($"[BLE] Preparing device connection state...");
-            try
-            {
-                // Connect via bluetoothctl with a timeout (bluetoothctl connect doesn't exit immediately)
-                var connectProcess = new Process
-                {
-                    StartInfo = new ProcessStartInfo
-                    {
-                        FileName = "bluetoothctl",
-                        Arguments = $"connect {deviceMac}",
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    }
-                };
-                
-                connectProcess.Start();
-                
-                // Read output with timeout - bluetoothctl connect may not exit immediately
-                var outputBuilder = new StringBuilder();
-                var readTask = Task.Run(async () =>
-                {
-                    string? line;
-                    while ((line = await connectProcess.StandardOutput.ReadLineAsync()) != null)
-                    {
-                        outputBuilder.AppendLine(line);
-                        // If we see "Connection successful", we can break early
-                        if (line.Contains("Connection successful", StringComparison.OrdinalIgnoreCase))
-                        {
-                            break;
-                        }
-                    }
-                }, cancel);
-                
-                // Wait for either the process to exit or timeout after 10 seconds
-                var timeoutTask = Task.Delay(10000, cancel);
-                var completedTask = await Task.WhenAny(readTask, timeoutTask, connectProcess.WaitForExitAsync(cancel));
-                
-                if (timeoutTask.IsCompleted)
-                {
-                    // Timeout - kill the process
-                    try { connectProcess.Kill(); } catch { }
-                    var connectOutput = outputBuilder.ToString();
-                    if (connectOutput.Contains("Connection successful", StringComparison.OrdinalIgnoreCase))
-                    {
-                        Console.WriteLine("[BLE] Device connected via bluetoothctl. Disconnecting for app...");
-                    }
-                    else
-                    {
-                        Console.WriteLine("[BLE] Connection attempt timed out. Continuing...");
-                    }
-                }
-                else
-                {
-                    var connectOutput = outputBuilder.ToString();
-                    if (connectOutput.Contains("Connection successful", StringComparison.OrdinalIgnoreCase))
-                    {
-                        Console.WriteLine("[BLE] Device connected via bluetoothctl. Disconnecting for app...");
-                    }
-                }
-                
-                // Wait a moment to ensure connection is established (if it succeeded)
-                await Task.Delay(1500, cancel);
-                
-                // Now disconnect so the app can connect
-                var disconnectProcess = new Process
-                {
-                    StartInfo = new ProcessStartInfo
-                    {
-                        FileName = "bluetoothctl",
-                        Arguments = $"disconnect {deviceMac}",
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    }
-                };
-                
-                disconnectProcess.Start();
-                await disconnectProcess.StandardOutput.ReadToEndAsync(cancel);
-                await disconnectProcess.WaitForExitAsync(cancel);
-                await Task.Delay(3000, cancel); // Give it time to fully disconnect and start advertising
-                Console.WriteLine("[BLE] Device disconnected. Waiting for device to start advertising...");
-                await Task.Delay(2000, cancel); // Additional wait for advertising to begin
-                Console.WriteLine("[BLE] Ready for app connection.");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[BLE] ⚠️ Could not prepare device connection: {ex.Message}");
-                // Not fatal, continue anyway
-            }
-        }
-        
-        return true;
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"[BLE] ⚠️ Warning: Could not prepare device via bluetoothctl: {ex.Message}");
-        Console.WriteLine("[BLE] Continuing with normal scan...");
-        return false; // Not fatal, continue anyway
-    }
+    try { await bleTask; } catch (OperationCanceledException) { }
 }
 
 async Task BleWorkerAsync(CancellationToken cancel)
@@ -589,15 +175,6 @@ async Task BleWorkerAsync(CancellationToken cancel)
     var BattChr = BluetoothUuid.FromShortId(0x2A19);
     
     Console.WriteLine($"[BLE] Worker starting on {RuntimeInformation.OSDescription}… token: " + desiredNameToken);
-    
-    // On Linux, prepare the device (disconnect from system Bluetooth if connected)
-    if (isLinux)
-    {
-        await PrepareDeviceOnLinux(desiredNameToken, cancel);
-        // Give Bluetooth stack a moment to settle after any disconnects and for device to start advertising
-        Console.WriteLine("[BLE] Waiting for device to become discoverable...");
-        await Task.Delay(3000, cancel);
-    }
 
     while (!cancel.IsCancellationRequested)
     {
@@ -606,15 +183,7 @@ async Task BleWorkerAsync(CancellationToken cancel)
             bool available;
             try
             {
-                var availabilityTask = Bluetooth.GetAvailabilityAsync();
-                var availabilityResult = await WithTimeoutBool(availabilityTask, TimeSpan.FromSeconds(5), "Bluetooth.GetAvailabilityAsync()", cancel);
-                if (availabilityResult == null && !cancel.IsCancellationRequested)
-                {
-                    Console.WriteLine("[BLE] ⚠️ Bluetooth availability check timed out. Retrying in 5s...");
-                    await Task.Delay(5000, cancel);
-                    continue;
-                }
-                available = availabilityResult ?? false;
+                available = await Bluetooth.GetAvailabilityAsync();
             }
             catch (DllNotFoundException ex)
             {
@@ -653,12 +222,7 @@ async Task BleWorkerAsync(CancellationToken cancel)
 
             if (!available)
             {
-                var now = DateTimeOffset.UtcNow;
-                if ((now - _lastUnavailableLog).TotalSeconds >= ThrottleIntervalSeconds)
-                {
-                    Console.WriteLine("[BLE] ⚠️ Bluetooth unavailable. Make sure Bluetooth is enabled and try turning it off and on again. Retrying in 5s…");
-                    _lastUnavailableLog = now;
-                }
+                Console.WriteLine("[BLE] Bluetooth unavailable. Retrying in 5s…");
                 await Task.Delay(5000, cancel);
                 continue;
             }
@@ -669,112 +233,20 @@ async Task BleWorkerAsync(CancellationToken cancel)
                 continue;
             }
 
-            // If we were connected but now we're not, log it periodically
-            if (_activeDev != null && _lastConnectionLostLog != DateTimeOffset.MinValue)
-            {
-                var now = DateTimeOffset.UtcNow;
-                if ((now - _lastConnectionLostLog).TotalSeconds >= ConnectionLostLogIntervalSeconds)
-                {
-                    Console.WriteLine("[BLE] ❌ Connection still lost. Attempting to reconnect...");
-                    _lastConnectionLostLog = now;
-                }
-            }
-
             Console.WriteLine("[BLE] Scanning for devices…");
-            if (isLinux && !string.IsNullOrWhiteSpace(_knownDeviceMac))
-            {
-                Console.WriteLine($"[BLE] Looking for device: {_knownDeviceMac}");
-            }
             BluetoothDevice? target = null;
 
-            IReadOnlyCollection<BluetoothDevice>? devices = null;
-            try
-            {
-                // Try scanning with a longer timeout on Linux since we know the device exists
-                var scanTimeout = isLinux ? TimeSpan.FromSeconds(20) : TimeSpan.FromSeconds(15);
-                var scanTask = Bluetooth.ScanForDevicesAsync(new RequestDeviceOptions { AcceptAllDevices = true });
-                devices = await WithTimeoutRef(scanTask, scanTimeout, "Bluetooth.ScanForDevicesAsync()", cancel);
-                if (devices == null && !cancel.IsCancellationRequested)
-                {
-                    var now = DateTimeOffset.UtcNow;
-                    if ((now - _lastScanTimeoutLog).TotalSeconds >= ThrottleIntervalSeconds)
-                    {
-                        var timeoutSeconds = isLinux ? 20 : 15;
-                        Console.WriteLine($"[BLE] ⚠️ Device scan timed out after {timeoutSeconds}s. This may indicate Bluetooth issues. Retrying in 3s...");
-                        Console.WriteLine("[BLE] 💡 TIP: Try turning the HRM device OFF and ON to make it re-announce/advertise.");
-                        Console.WriteLine("[BLE] 💡 TIP: BLE devices must be advertising to be discovered. If it's not advertising, the scan won't find it.");
-                        if (isLinux)
-                        {
-                            Console.WriteLine("[BLE] 💡 TIP: Try restarting Bluetooth service: sudo systemctl restart bluetooth");
-                            Console.WriteLine("[BLE] 💡 TIP: If bluetoothctl can see the device but the app can't, this may be a D-Bus permissions issue.");
-                            Console.WriteLine("[BLE] 💡 TIP: Check D-Bus permissions: journalctl -u bluetooth | tail -20");
-                        }
-                        _lastScanTimeoutLog = now;
-                    }
-                    await Task.Delay(3000, cancel);
-                    continue;
-                }
-                if (devices == null) continue;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[BLE] ❌ ERROR: Device scan failed: {ex.Message}");
-                Console.WriteLine("[BLE] 💡 TIP: Try turning Bluetooth off and on again.");
-                Console.WriteLine("[BLE] 💡 TIP: If your device is connected in system Bluetooth settings, disconnect it first - BLE devices can only connect to one client at a time.");
-                await Task.Delay(3000, cancel);
-                continue;
-            }
+            var devices = await Bluetooth.ScanForDevicesAsync(new RequestDeviceOptions { AcceptAllDevices = true });
 
-            // Log what devices were found for debugging
-            if (devices != null && devices.Count > 0)
-            {
-                Console.WriteLine($"[BLE] Found {devices.Count} device(s):");
-                foreach (var dev in devices)
-                {
-                    Console.WriteLine($"  - {dev?.Name ?? "Unknown"} (ID: {dev?.Id ?? "N/A"})");
-                }
-            }
+            if (!string.IsNullOrWhiteSpace(desiredNameToken))
+                target = devices.FirstOrDefault(d => (d?.Name ?? "").Contains(desiredNameToken, StringComparison.OrdinalIgnoreCase));
 
-            if (devices != null)
-            {
-                // If we have a known MAC address from bluetoothctl, try to match by ID first
-                if (!string.IsNullOrWhiteSpace(_knownDeviceMac))
-                {
-                    target = devices.FirstOrDefault(d => d?.Id == _knownDeviceMac);
-                    if (target != null)
-                    {
-                        Console.WriteLine($"[BLE] Matched device by known MAC address: {_knownDeviceMac}");
-                    }
-                }
-                
-                // Fall back to name matching
-                if (target == null && !string.IsNullOrWhiteSpace(desiredNameToken))
-                {
-                    target = devices.FirstOrDefault(d => (d?.Name ?? "").Contains(desiredNameToken, StringComparison.OrdinalIgnoreCase));
-                }
-
-                // Last resort: any device with a name
-                target ??= devices.FirstOrDefault(d => !string.IsNullOrWhiteSpace(d?.Name));
-            }
+            target ??= devices.FirstOrDefault(d => !string.IsNullOrWhiteSpace(d?.Name));
 
             if (target is null)
             {
-                var now = DateTimeOffset.UtcNow;
-                if ((now - _lastNoDeviceLog).TotalSeconds >= ThrottleIntervalSeconds)
-                {
-                    Console.WriteLine($"[BLE] ⚠️ No matching device found (looking for name containing '{desiredNameToken}').");
-                    if (devices != null && devices.Count == 0)
-                    {
-                        Console.WriteLine("[BLE] 💡 No devices found in scan. This might indicate:");
-                        Console.WriteLine("[BLE]    - Device is connected to system Bluetooth (disconnect it first)");
-                        Console.WriteLine("[BLE]    - Device is not advertising/discoverable");
-                        Console.WriteLine("[BLE]    - Bluetooth permissions issue (check with: journalctl -u bluetooth)");
-                    }
-                    Console.WriteLine("[BLE] 💡 TIP: Make sure your device is on and nearby.");
-                    Console.WriteLine("[BLE] 💡 TIP: If the device is connected in system Bluetooth settings, disconnect it first - BLE devices can only connect to one client at a time.");
-                    _lastNoDeviceLog = now;
-                }
-                await Task.Delay(3000, cancel);
+                Console.WriteLine("[BLE] No matching device found. Retrying in 2s…");
+                await Task.Delay(2000, cancel);
                 continue;
             }
 
@@ -785,71 +257,23 @@ async Task BleWorkerAsync(CancellationToken cancel)
             }
 
             Console.WriteLine($"[BLE] Connecting to {target.Name} ({target.Id}) …");
-            try
-            {
-                var connectTask = target.Gatt.ConnectAsync();
-                bool connected = await WithTimeoutTask(connectTask, TimeSpan.FromSeconds(10), $"GATT.ConnectAsync() to {target.Name}", cancel);
-                if (!connected && !cancel.IsCancellationRequested)
-                {
-                    Console.WriteLine($"[BLE] ❌ CONNECTION FAILED: Could not connect to {target.Name} within 10s");
-                    Console.WriteLine("[BLE] 💡 TIP: Try turning Bluetooth off and on again, or ensure the device is not connected to another application. Retrying in 3s...");
-                    SafeDisconnect(target);
-                    await Task.Delay(3000, cancel);
-                    continue;
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[BLE] ❌ CONNECTION ERROR: Failed to connect to {target.Name}: {ex.Message}");
-                Console.WriteLine("[BLE] 💡 TIP: Try turning Bluetooth off and on again. Retrying in 3s...");
-                SafeDisconnect(target);
-                await Task.Delay(3000, cancel);
-                continue;
-            }
-            
+            await target.Gatt.ConnectAsync();
             var gatt = target.Gatt;
             if (gatt is null || !gatt.IsConnected)
             {
-                Console.WriteLine($"[BLE] ❌ GATT connection failed: GATT is null or not connected after ConnectAsync");
-                Console.WriteLine("[BLE] 💡 TIP: Try turning Bluetooth off and on again. Retrying in 3s...");
-                SafeDisconnect(target);
-                await Task.Delay(3000, cancel);
-                continue;
-            }
-            Console.WriteLine($"[BLE] ✓ Connected to {target.Name}");
-            // Reset connection lost log timer on successful connection
-            _lastConnectionLostLog = DateTimeOffset.MinValue;
-
-            GattService? hrs = null;
-            try
-            {
-                var hrsTask = gatt.GetPrimaryServiceAsync(HrsService);
-                hrs = await WithTimeoutRef(hrsTask, TimeSpan.FromSeconds(5), "GetPrimaryServiceAsync(HeartRateService)", cancel);
-                if (hrs == null && !cancel.IsCancellationRequested)
-                {
-                    Console.WriteLine("[BLE] ❌ Heart Rate Service not found or request timed out");
-                    Console.WriteLine("[BLE] 💡 This device may not support Heart Rate Service (UUID 0x180D)");
-                    SafeDisconnect(target);
-                    await Task.Delay(2000, cancel);
-                    continue;
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[BLE] ❌ ERROR: Failed to get Heart Rate Service: {ex.Message}");
-                SafeDisconnect(target);
+                Console.WriteLine("[BLE] GATT connection failed.");
                 await Task.Delay(2000, cancel);
                 continue;
             }
-            
+
+            var hrs = await gatt.GetPrimaryServiceAsync(HrsService);
             if (hrs is null)
             {
-                Console.WriteLine("[BLE] ❌ Heart Rate Service missing; disconnecting and rescanning.");
+                Console.WriteLine("[BLE] Heart Rate Service missing; rescanning.");
                 SafeDisconnect(target);
-                await Task.Delay(2000, cancel);
+                await Task.Delay(1000, cancel);
                 continue;
             }
-            Console.WriteLine("[BLE] ✓ Heart Rate Service found");
 
             int? batteryPct = null;
             try
@@ -925,36 +349,14 @@ async Task BleWorkerAsync(CancellationToken cancel)
             }
             catch { }
 
-            GattCharacteristic? hrm = null;
-            try
-            {
-                var hrmTask = hrs.GetCharacteristicAsync(HrmChar);
-                hrm = await WithTimeoutRef(hrmTask, TimeSpan.FromSeconds(5), "GetCharacteristicAsync(HRMeasurement)", cancel);
-                if (hrm == null && !cancel.IsCancellationRequested)
-                {
-                    Console.WriteLine("[BLE] ❌ HR Measurement characteristic not found or request timed out");
-                    Console.WriteLine("[BLE] 💡 This device may not support HR Measurement characteristic (UUID 0x2A37)");
-                    SafeDisconnect(target);
-                    await Task.Delay(2000, cancel);
-                    continue;
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[BLE] ❌ ERROR: Failed to get HR Measurement characteristic: {ex.Message}");
-                SafeDisconnect(target);
-                await Task.Delay(2000, cancel);
-                continue;
-            }
-            
+            var hrm = await hrs.GetCharacteristicAsync(HrmChar);
             if (hrm is null)
             {
-                Console.WriteLine("[BLE] ❌ HR Measurement characteristic not found; disconnecting.");
+                Console.WriteLine("[BLE] HR Measurement characteristic not found; disconnecting.");
                 SafeDisconnect(target);
-                await Task.Delay(2000, cancel);
+                await Task.Delay(1000, cancel);
                 continue;
             }
-            Console.WriteLine("[BLE] ✓ HR Measurement characteristic found");
 
             _activeDev = target;
             _activeId = target.Id;
@@ -1014,106 +416,24 @@ async Task BleWorkerAsync(CancellationToken cancel)
             };
 
             hrm.CharacteristicValueChanged += _hrmHandler;
-            try
-            {
-                var subscribeTask = hrm.StartNotificationsAsync();
-                bool subscribed = await WithTimeoutTask(subscribeTask, TimeSpan.FromSeconds(5), "StartNotificationsAsync()", cancel);
-                if (!subscribed && !cancel.IsCancellationRequested)
-                {
-                    Console.WriteLine("[BLE] ❌ SUBSCRIPTION FAILED: Could not start HR notifications within 5s");
-                    Console.WriteLine("[BLE] 💡 TIP: The device may not support notifications, or there may be a connection issue");
-                    hrm.CharacteristicValueChanged -= _hrmHandler;
-                    _hrmHandler = null;
-                    SafeDisconnect(target);
-                    await Task.Delay(2000, cancel);
-                    continue;
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[BLE] ❌ SUBSCRIPTION ERROR: Failed to start HR notifications: {ex.Message}");
-                Console.WriteLine("[BLE] 💡 TIP: Try disconnecting and reconnecting the device");
-                hrm.CharacteristicValueChanged -= _hrmHandler;
-                _hrmHandler = null;
-                SafeDisconnect(target);
-                await Task.Delay(2000, cancel);
-                continue;
-            }
-            
+            await hrm.StartNotificationsAsync();
             _subscribed = true;
-            Console.WriteLine("[BLE] ✓ Successfully subscribed to HR notifications");
-            
-            // Monitor connection health - check if we're actually receiving data
-            var healthCheckTask = Task.Run(async () =>
-            {
-                await Task.Delay(TimeSpan.FromSeconds(10), cancel); // Wait 10s for first reading
-                while (!cancel.IsCancellationRequested && gatt.IsConnected && _subscribed)
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(15), cancel);
-                    if (cancel.IsCancellationRequested || !gatt.IsConnected || !_subscribed) break;
-                    
-                    var currentLatest = latest; // Capture current value
-                    var now = DateTimeOffset.UtcNow;
-                    var timeSinceLastHr = currentLatest != null 
-                        ? (now - currentLatest.ts).TotalSeconds 
-                        : double.MaxValue;
-                    
-                    if (timeSinceLastHr > 20)
-                    {
-                        // Throttle health warnings to avoid spam
-                        if ((now - _lastHealthWarningLog).TotalSeconds >= ThrottleIntervalSeconds)
-                        {
-                            Console.WriteLine($"[BLE] ⚠️ WARNING: No heart rate data received in {timeSinceLastHr:F1}s");
-                            Console.WriteLine("[BLE] 💡 The subscription may not be working. Checking connection status...");
-                            _lastHealthWarningLog = now;
-                        }
-                        if (!gatt.IsConnected)
-                        {
-                            Console.WriteLine("[BLE] ❌ Connection lost. Will attempt to reconnect...");
-                            break;
-                        }
-                    }
-                }
-            }, cancel);
 
-            // Monitor connection status - wait while connected
             while (!cancel.IsCancellationRequested && gatt.IsConnected)
-            {
                 await Task.Delay(500, cancel);
-            }
 
-            // Connection was lost
-            if (!cancel.IsCancellationRequested && !gatt.IsConnected)
-            {
-                var now = DateTimeOffset.UtcNow;
-                Console.WriteLine("[BLE] ❌ Connection lost. Will attempt to reconnect...");
-                _lastConnectionLostLog = now;
-            }
-            else if (cancel.IsCancellationRequested)
-            {
-                Console.WriteLine("[BLE] Disconnected (shutdown requested).");
-            }
-
+            Console.WriteLine("[BLE] Disconnected.");
             _subscribed = false;
             _activeDev = null;
             _activeId = null;
-            if (_hrmHandler != null && hrm != null)
-            {
-                try { hrm.CharacteristicValueChanged -= _hrmHandler; } catch { }
-            }
             _hrmHandler = null; // Clear handler reference on disconnect
             await Task.Delay(1000, cancel);
         }
-        catch (OperationCanceledException) 
-        {
-            Console.WriteLine("[BLE] Operation cancelled. Shutting down...");
-        }
+        catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            Console.WriteLine($"[BLE] ❌ ERROR in BLE worker: {ex.Message}");
-            Console.WriteLine($"[BLE] Stack trace: {ex.StackTrace}");
-            Console.WriteLine("[BLE] Retrying in 3s...");
-            await Task.Delay(3000, cancel);
+            Console.WriteLine("[BLE] Error: " + ex.Message);
+            await Task.Delay(1500, cancel);
         }
     }
 }
@@ -1146,26 +466,6 @@ public sealed record LatestHr(
     IReadOnlyList<int> rr,
     int? energy
 );
-
-// Track last timeout log time per operation to throttle messages
-static class TimeoutLogger
-{
-    private static readonly Dictionary<string, DateTimeOffset> _logTimes = new();
-    private static readonly object _lock = new();
-
-    public static void LogTimeout(string operation, TimeSpan timeout)
-    {
-        var now = DateTimeOffset.UtcNow;
-        lock (_lock)
-        {
-            if (!_logTimes.TryGetValue(operation, out var lastLog) || (now - lastLog).TotalSeconds >= 30)
-            {
-                Console.WriteLine($"[BLE] ⚠️ TIMEOUT: {operation} took longer than {timeout.TotalSeconds}s and was cancelled");
-                _logTimes[operation] = now;
-            }
-        }
-    }
-}
 
 static class HeartRateParser
 {

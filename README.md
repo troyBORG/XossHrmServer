@@ -156,34 +156,5 @@ Lists all saved CSV sessions (when logging is enabled).
 
 ---
 
-## 🐛 Troubleshooting
-
-### Device Not Found / Connection Issues
-
-**BLE devices can only connect to one client at a time.** If your device is connected to system Bluetooth (KDE, Windows Settings, etc.), disconnect it first:
-
-- **Linux (KDE/GNOME):** Disconnect the device in Bluetooth settings, or use `bluetoothctl`:
-  ```bash
-  bluetoothctl
-  disconnect <device_mac>
-  trust <device_mac>  # Optional: mark device as trusted
-  ```
-
-- **Windows:** Disconnect the device in Settings → Bluetooth & devices
-
-- **If scanning still times out:**
-  - Restart Bluetooth service: `sudo systemctl restart bluetooth` (Linux)
-  - Turn Bluetooth off and on again in system settings
-  - Turn the HRM device OFF and ON to make it re-announce/advertise
-  - Check Bluetooth logs: `journalctl -u bluetooth | tail -20` (Linux)
-  - If `bluetoothctl` can see the device but the app can't, this may be a D-Bus permissions issue with the InTheHand.BluetoothLE library
-  - Reboot if issues persist
-
-**Known Issue:** On some Linux systems, the InTheHand.BluetoothLE library's scan may timeout even when `bluetoothctl` can see the device. This appears to be a library/D-Bus compatibility issue. The app will continue retrying, but you may need to restart the Bluetooth service or reboot.
-
-The app includes detailed diagnostics and will show what devices are found during scanning to help troubleshoot connection issues.
-
----
-
 ## 📄 License
 MIT License © 2025 troyBORG
