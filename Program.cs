@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -74,6 +75,20 @@ void ConfigureApp(WebApplication app)
         return Results.Json(new { bpm = bpmPadded, battery = batteryPadded });
     });
 }
+
+// Get version from assembly
+var assemblyVersion = Assembly.GetExecutingAssembly().GetName().Version;
+var version = assemblyVersion != null 
+    ? (assemblyVersion.Revision >= 0 
+        ? $"{assemblyVersion.Major}.{assemblyVersion.Minor}.{assemblyVersion.Build}.{assemblyVersion.Revision}"
+        : $"{assemblyVersion.Major}.{assemblyVersion.Minor}.{assemblyVersion.Build}")
+    : "1.0.0";
+
+// Welcome message
+Console.WriteLine($"═══════════════════════════════════════════════════════════");
+Console.WriteLine($"  Welcome to XossHrmServer v{version}");
+Console.WriteLine($"═══════════════════════════════════════════════════════════");
+Console.WriteLine();
 
 var cts = new CancellationTokenSource();
 var isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
