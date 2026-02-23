@@ -22,6 +22,9 @@ string? _activeId = null;
 bool _subscribed = false;
 EventHandler<GattCharacteristicValueChangedEventArgs>? _hrmHandler = null;
 bool AllowZeroBpm = (Environment.GetEnvironmentVariable("ALLOW_ZERO_BPM") ?? "false").Equals("true", StringComparison.OrdinalIgnoreCase);
+var reconnectDelayMs = int.TryParse(Environment.GetEnvironmentVariable("HRM_RECONNECT_DELAY_MS"), out var rdm) && rdm > 0 ? rdm : 500;
+var connectDelayMs = int.TryParse(Environment.GetEnvironmentVariable("HRM_CONNECT_DELAY_MS"), out var cdm) && cdm >= 0 ? cdm : 800;
+var connectRetries = int.TryParse(Environment.GetEnvironmentVariable("HRM_CONNECT_RETRIES"), out var cr) && cr >= 1 ? cr : 3;
 
 void ConfigureApp(WebApplication app)
 {
@@ -271,12 +274,46 @@ async Task BleWorkerAsync(CancellationToken cancel)
                 continue;
             }
 
-            Console.WriteLine($"[BLE] Connecting to {target.Name} ({target.Id}) …");
-            await target.Gatt.ConnectAsync();
+            if (connectDelayMs > 0)
+                await Task.Delay(connectDelayMs, cancel);
+
+            Exception? lastConnectEx = null;
+            for (int attempt = 1; attempt <= connectRetries; attempt++)
+            {
+                try
+                {
+                    if (attempt > 1)
+                        Console.WriteLine($"[BLE] Retry {attempt}/{connectRetries} connecting to {target.Name} …");
+                    else
+                        Console.WriteLine($"[BLE] Connecting to {target.Name} ({target.Id}) …");
+                    await target.Gatt.ConnectAsync();
+                    lastConnectEx = null;
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    lastConnectEx = ex;
+                    var msg = ex.Message ?? "";
+                    if (attempt < connectRetries)
+                    {
+                        if (msg.Contains("le-connection-abort-by-local", StringComparison.OrdinalIgnoreCase))
+                            Console.WriteLine("[BLE] Connection aborted by adapter (often timing). Retrying…");
+                        await Task.Delay(2000, cancel);
+                    }
+                    else
+                    {
+                        Console.WriteLine("[BLE] Error: " + ex.Message);
+                        if (msg.Contains("le-connection-abort-by-local", StringComparison.OrdinalIgnoreCase))
+                            Console.WriteLine("[BLE] Tip: On Linux, try increasing LEAutoconnecttimeout in /etc/bluetooth/main.conf (e.g. 16000).");
+                    }
+                }
+            }
+
             var gatt = target.Gatt;
             if (gatt is null || !gatt.IsConnected)
             {
-                Console.WriteLine("[BLE] GATT connection failed.");
+                if (lastConnectEx is null)
+                    Console.WriteLine("[BLE] GATT connection failed.");
                 await Task.Delay(2000, cancel);
                 continue;
             }
@@ -442,7 +479,7 @@ async Task BleWorkerAsync(CancellationToken cancel)
             _activeDev = null;
             _activeId = null;
             _hrmHandler = null; // Clear handler reference on disconnect
-            await Task.Delay(1000, cancel);
+            await Task.Delay(reconnectDelayMs, cancel);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)

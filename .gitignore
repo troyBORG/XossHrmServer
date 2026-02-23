@@ -35,6 +35,9 @@ launchSettings.json
 publish/
 *.zip
 
+# Session logs (CSV)
+logs/
+
 # Local build scripts
 build_publish.ps1
 build_publish.sh

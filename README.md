@@ -142,6 +142,9 @@ Lists all saved CSV sessions (when logging is enabled).
 | `PORT` | `5279` | HTTP / WebSocket server port (auto-retries if in use) |
 | `DOTNET_DISABLE_BLE` | `false` | Set to `true` to run in HTTP-only mode |
 | `ALLOW_ZERO_BPM` | `false` | Set to `true` to allow 0 BPM readings |
+| `HRM_RECONNECT_DELAY_MS` | `500` | Delay (ms) before rescanning after a disconnect; lower = faster reconnect (e.g. for weak signal) |
+| `HRM_CONNECT_DELAY_MS` | `800` | Delay (ms) after scan before connecting; can help avoid `le-connection-abort-by-local` on Linux |
+| `HRM_CONNECT_RETRIES` | `3` | Number of connection attempts per scan before rescanning |
 
 ---
 
@@ -153,6 +156,8 @@ Lists all saved CSV sessions (when logging is enabled).
 - `/ws` provides a live WebSocket telemetry stream.  
 - `/stats`, `/history`, and `/dashboard` provide rolling analytics and CSV logging.
 - Session data is automatically logged to CSV files in the `logs/` directory.
+- **Connection drops (e.g. low Bluetooth signal):** If the link drops after a few minutes, keep the HRM closer to the computer’s Bluetooth adapter. The server auto-reconnects; you can set `HRM_RECONNECT_DELAY_MS=300` for quicker reconnects.
+- **Linux `le-connection-abort-by-local`:** The server now waits 800 ms after scan and retries the connection up to 3 times. If it still fails, try increasing `LEAutoconnecttimeout` in `/etc/bluetooth/main.conf` (e.g. `LEAutoconnecttimeout=16000`), then restart Bluetooth.
 
 ---
 

@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+            tfm: net10.0
+          - os: windows-latest
+            rid: win-x64
+            tfm: net10.0-windows10.0.19041.0
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish
+        run: dotnet publish -c Release -f ${{ matrix.tfm }} -r ${{ matrix.rid }} --self-contained false -o publish
+
+      - name: Archive (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: cd publish && zip -r ../XossHrmServer-${{ matrix.rid }}.zip . && cd ..
+
+      - name: Archive (Windows)
+        if: matrix.os == 'windows-latest'
+        run: Compress-Archive -Path publish\* -DestinationPath XossHrmServer-${{ matrix.rid }}.zip
+        shell: pwsh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.rid }}
+          path: XossHrmServer-${{ matrix.rid }}.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download linux-x64
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-x64
+          path: release-artifacts
+
+      - name: Download win-x64
+        uses: actions/download-artifact@v4
+        with:
+          name: win-x64
+          path: release-artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          generate_release_notes: true
+          files: |
+            release-artifacts/XossHrmServer-linux-x64.zip
+            release-artifacts/XossHrmServer-win-x64.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
