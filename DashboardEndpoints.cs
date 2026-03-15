@@ -14,8 +14,8 @@ public static class DashboardEndpoints
     /// </summary>
     public static void MapDashboardAndLogs(this WebApplication app, string logsDir)
     {
-        // List CSVs
-        app.MapGet("/logs", () =>
+        // List CSVs (no cache so dropdown always reflects current logs folder)
+        app.MapGet("/logs", (HttpContext ctx) =>
         {
             if (!Directory.Exists(logsDir)) return Results.Json(Array.Empty<object>());
             var list = Directory.EnumerateFiles(logsDir, "*.csv")
@@ -26,6 +26,7 @@ public static class DashboardEndpoints
                     size = new FileInfo(f).Length,
                     modifiedUtc = File.GetLastWriteTimeUtc(f)
                 });
+            ctx.Response.Headers.CacheControl = "no-store";
             return Results.Json(list);
         });
 
@@ -123,9 +124,10 @@ public static class DashboardEndpoints
   *{box-sizing:border-box}
   html{scroll-behavior:smooth;height:100%}
   body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:#0b1220;color:#e8eef7;padding:var(--pad);min-height:100%}
-  h1{font-size:clamp(18px, 2.2vw, 22px);margin:0 0 10px}
-  .row{display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
-  .dashboard-header{position:sticky;top:0;z-index:10;background:#131c31;border:1px solid #22304f;border-radius:12px;padding:var(--pad);margin-bottom:16px;box-shadow:0 6px 20px rgba(0,0,0,.2)}
+  h1{font-size:clamp(18px, 2.2vw, 22px);margin:0 0 4px}
+  .row{display:flex;gap:12px;align-items:center;margin-bottom:0;flex-wrap:wrap}
+  .dashboard-header .row{margin-bottom:0}
+  .dashboard-header{position:sticky;top:0;z-index:10;background:#131c31;border:1px solid #22304f;border-radius:12px;padding:8px 14px;margin-bottom:12px;box-shadow:0 6px 20px rgba(0,0,0,.2)}
   .muted{opacity:.8}
   button{background:#2c72ff;color:#fff;border:0;border-radius:10px;padding:8px 12px;cursor:pointer}
   input,select{background:#111a2c;color:#e8eef7;border:1px solid #2b3b5d;border-radius:8px;padding:6px 8px}
@@ -166,7 +168,7 @@ public static class DashboardEndpoints
 let chart;
 
 async function loadList(){
-  const r = await fetch('/logs');
+  const r = await fetch('/logs', { cache: 'no-store' });
   const files = await r.json();
   const sel = document.getElementById('file');
   sel.innerHTML = '';
@@ -187,7 +189,7 @@ async function loadList(){
 async function loadData(){
   const sel = document.getElementById('file');
   if(!sel.value){ document.getElementById('meta').textContent = 'No logs found.'; return; }
-  const r = await fetch('/log.json?file=' + encodeURIComponent(sel.value));
+  const r = await fetch('/log.json?file=' + encodeURIComponent(sel.value), { cache: 'no-store' });
   if(!r.ok){ document.getElementById('meta').textContent = 'Failed to load.'; return; }
   const rows = await r.json();
   const labels = rows.map(p => new Date(p.ts));
