@@ -119,19 +119,32 @@ public static class DashboardEndpoints
 <meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'/>
 <title>XossHrmServer — Dashboard</title>
 <style>
-  body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px;background:#0b1220;color:#e8eef7}
-  h1{font-size:20px;margin:0 0 10px}
+  :root{--pad: clamp(12px, 2.5vw, 28px); --chart-h: clamp(280px, 45vh, 520px)}
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth;height:100%}
+  body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:#0b1220;color:#e8eef7;padding:var(--pad);min-height:100%}
+  h1{font-size:clamp(18px, 2.2vw, 22px);margin:0 0 10px}
   .row{display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
-  .card{background:#131c31;border:1px solid #22304f;border-radius:12px;padding:16px;box-shadow:0 6px 20px rgba(0,0,0,.2)}
+  .dashboard-header{position:sticky;top:0;z-index:10;background:#131c31;border:1px solid #22304f;border-radius:12px;padding:var(--pad);margin-bottom:16px;box-shadow:0 6px 20px rgba(0,0,0,.2)}
   .muted{opacity:.8}
   button{background:#2c72ff;color:#fff;border:0;border-radius:10px;padding:8px 12px;cursor:pointer}
   input,select{background:#111a2c;color:#e8eef7;border:1px solid #2b3b5d;border-radius:8px;padding:6px 8px}
-  canvas{max-width:100%;height:420px}
+  .chart-wrap{background:#131c31;border:1px solid #22304f;border-radius:12px;padding:var(--pad);box-shadow:0 6px 20px rgba(0,0,0,.2);min-height:0}
+  .chart-container{width:100%;height:var(--chart-h);min-height:280px;position:relative}
+  .chart-container canvas{display:block;width:100%!important;height:100%!important}
   a{color:#7fb3ff}
+  @media (min-aspect-ratio: 21/9){
+    :root{--pad: clamp(20px, 4vw, 48px); --chart-h: clamp(320px, 55vh, 600px)}
+    body{max-width:100%}
+    .dashboard-header,.chart-wrap{max-width:min(100%, 1800px);margin-left:auto;margin-right:auto}
+  }
+  @media (max-aspect-ratio: 1/1){
+    :root{--chart-h: clamp(260px, 50vh, 420px)}
+  }
 </style>
 </head>
 <body>
-  <div class='card'>
+  <div class='dashboard-header'>
     <h1>Session Dashboard</h1>
     <div class='row'>
       <label for='file'>Dataset:</label>
@@ -141,7 +154,9 @@ public static class DashboardEndpoints
       <button id='delete' style='background:#ff3b3b'>Delete</button>
       <span id='meta' class='muted'></span>
     </div>
-    <canvas id='chart'></canvas>
+  </div>
+  <div class='chart-wrap'>
+    <div class='chart-container'><canvas id='chart'></canvas></div>
   </div>
 
 <script src='https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js'></script>
@@ -184,21 +199,44 @@ async function loadData(){
   const max = bpm.length ? Math.max(...bpm) : 0;
   document.getElementById('meta').textContent = `points: ${bpm.length} | duration: ${durMin} min | avg: ${avg} bpm | min: ${min} | max: ${max}`;
 
+  function niceRange(dataMin, dataMax, paddingPct, roundTo) {
+    if (dataMin === dataMax) {
+      const v = Math.max(0, dataMin);
+      const pad = Math.max(10, roundTo);
+      return { min: Math.max(0, Math.floor((v - pad) / roundTo) * roundTo), max: Math.ceil((v + pad) / roundTo) * roundTo };
+    }
+    const range = dataMax - dataMin;
+    const pad = Math.max(8, range * (paddingPct || 0.1));
+    let minVal = Math.max(0, dataMin - pad);
+    let maxVal = dataMax + pad;
+    minVal = Math.floor(minVal / roundTo) * roundTo;
+    maxVal = Math.ceil(maxVal / roundTo) * roundTo;
+    return { min: Math.max(0, minVal), max: Math.min(220, maxVal) };
+  }
+  const yRange = bpm.length ? niceRange(min, max, 0.1, 5) : { min: 50, max: 180 };
+
   if(chart) chart.destroy();
-  chart = new Chart(document.getElementById('chart').getContext('2d'), {
+  const ctx = document.getElementById('chart').getContext('2d');
+  chart = new Chart(ctx, {
     type: 'line',
     data: { labels, datasets: [{ label: 'BPM', data: bpm, tension: .2, pointRadius: 0, borderWidth: 2 }] },
     options: {
       animation: false, normalized: true,
+      responsive: true,
+      maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       scales: {
         x: { type: 'time', time: { unit: 'minute' }, ticks: { color: '#b8c9f1' }, grid: { color: 'rgba(255,255,255,.06)' } },
-        y: { suggestedMin: 50, suggestedMax: 180, ticks: { color: '#b8c9f1' }, grid: { color: 'rgba(255,255,255,.06)' } }
+        y: { min: yRange.min, max: yRange.max, ticks: { color: '#b8c9f1' }, grid: { color: 'rgba(255,255,255,.06)' } }
       },
       plugins: { legend: { labels: { color: '#e8eef7' } } }
     }
   });
 }
+
+function onResize(){ if(chart) chart.resize(); }
+window.addEventListener('resize', onResize);
+new ResizeObserver(onResize).observe(document.querySelector('.chart-container'));
 
 document.getElementById('reload').addEventListener('click', loadData);
 document.getElementById('file').addEventListener('change', e => {
@@ -215,6 +253,7 @@ document.getElementById('delete').addEventListener('click', async () => {
   }
 });
 
+window.addEventListener('load', () => window.scrollTo(0, 0));
 loadList().then(loadData);
 </script>
 </body>
