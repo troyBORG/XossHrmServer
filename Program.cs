@@ -21,10 +21,12 @@ DateTimeOffset _lastLoggedTime = DateTimeOffset.MinValue;
 string? _activeId = null;
 bool _subscribed = false;
 EventHandler<GattCharacteristicValueChangedEventArgs>? _hrmHandler = null;
+DateTimeOffset _lastHrReceived = DateTimeOffset.MinValue;
 bool AllowZeroBpm = (Environment.GetEnvironmentVariable("ALLOW_ZERO_BPM") ?? "false").Equals("true", StringComparison.OrdinalIgnoreCase);
 var reconnectDelayMs = int.TryParse(Environment.GetEnvironmentVariable("HRM_RECONNECT_DELAY_MS"), out var rdm) && rdm > 0 ? rdm : 500;
 var connectDelayMs = int.TryParse(Environment.GetEnvironmentVariable("HRM_CONNECT_DELAY_MS"), out var cdm) && cdm >= 0 ? cdm : 800;
 var connectRetries = int.TryParse(Environment.GetEnvironmentVariable("HRM_CONNECT_RETRIES"), out var cr) && cr >= 1 ? cr : 3;
+var noDataTimeoutSec = int.TryParse(Environment.GetEnvironmentVariable("HRM_NO_DATA_TIMEOUT_SEC"), out var ndt) && ndt > 0 ? ndt : 45;
 
 void ConfigureApp(WebApplication app)
 {
@@ -437,6 +439,7 @@ async Task BleWorkerAsync(CancellationToken cancel)
                 if (!AllowZeroBpm && reading.Bpm == 0) return;
 
                 var now = DateTimeOffset.UtcNow;
+                _lastHrReceived = now;
 
                 latest = new LatestHr(
                     device: target.Name ?? "unknown",
@@ -470,11 +473,24 @@ async Task BleWorkerAsync(CancellationToken cancel)
             hrm.CharacteristicValueChanged += _hrmHandler;
             await hrm.StartNotificationsAsync();
             _subscribed = true;
+            _lastHrReceived = DateTimeOffset.UtcNow; // grace period for first packet
 
+            var noDataReconnect = false;
             while (!cancel.IsCancellationRequested && gatt.IsConnected)
+            {
+                var elapsed = (DateTimeOffset.UtcNow - _lastHrReceived).TotalSeconds;
+                if (elapsed >= noDataTimeoutSec)
+                {
+                    Console.WriteLine($"[BLE] No HR data for {(int)elapsed}s; reconnecting…");
+                    SafeDisconnect(target);
+                    noDataReconnect = true;
+                    break;
+                }
                 await Task.Delay(500, cancel);
+            }
 
-            Console.WriteLine("[BLE] Disconnected.");
+            if (!noDataReconnect)
+                Console.WriteLine("[BLE] Disconnected.");
             _subscribed = false;
             _activeDev = null;
             _activeId = null;

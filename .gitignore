@@ -41,3 +41,6 @@ logs/
 # Local build scripts
 build_publish.ps1
 build_publish.sh
+
+# Local docs (do not upload)
+localdocs/

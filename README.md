@@ -145,6 +145,7 @@ Lists all saved CSV sessions (when logging is enabled).
 | `HRM_RECONNECT_DELAY_MS` | `500` | Delay (ms) before rescanning after a disconnect; lower = faster reconnect (e.g. for weak signal) |
 | `HRM_CONNECT_DELAY_MS` | `800` | Delay (ms) after scan before connecting; can help avoid `le-connection-abort-by-local` on Linux |
 | `HRM_CONNECT_RETRIES` | `3` | Number of connection attempts per scan before rescanning |
+| `HRM_NO_DATA_TIMEOUT_SEC` | `45` | If no HR reading for this many seconds, force reconnect (handles “silent” drops) |
 
 ---
 
