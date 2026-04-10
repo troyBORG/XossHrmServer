@@ -142,10 +142,13 @@ Lists all saved CSV sessions (when logging is enabled).
 | `PORT` | `5279` | HTTP / WebSocket server port (auto-retries if in use) |
 | `DOTNET_DISABLE_BLE` | `false` | Set to `true` to run in HTTP-only mode |
 | `ALLOW_ZERO_BPM` | `false` | Set to `true` to allow 0 BPM readings |
-| `HRM_RECONNECT_DELAY_MS` | `500` | Delay (ms) before rescanning after a disconnect; lower = faster reconnect (e.g. for weak signal) |
-| `HRM_CONNECT_DELAY_MS` | `800` | Delay (ms) after scan before connecting; can help avoid `le-connection-abort-by-local` on Linux |
-| `HRM_CONNECT_RETRIES` | `3` | Number of connection attempts per scan before rescanning |
-| `HRM_NO_DATA_TIMEOUT_SEC` | `45` | If no HR reading for this many seconds, force reconnect (handles “silent” drops) |
+| `HRM_RECONNECT_DELAY_MS` | `150` | Delay (ms) before rescanning after a disconnect; lower = faster reconnect |
+| `HRM_CONNECT_DELAY_MS` | `150` | Delay (ms) after scan before connecting |
+| `HRM_CONNECT_RETRIES` | `5` | Number of connection attempts per scan before rescanning |
+| `HRM_NO_DATA_TIMEOUT_SEC` | `20` | If no HR reading for this many seconds, attempt re-subscribe then reconnect |
+| `HRM_AUTO_RESTART_BLUETOOTH` | `false` | Linux only: auto-attempt `systemctl restart bluetooth` after repeated adapter-abort failures |
+| `HRM_BLUETOOTH_RESTART_THRESHOLD` | `12` | Consecutive local-abort failures before auto-restart is attempted |
+| `HRM_BLUETOOTH_RESTART_COOLDOWN_SEC` | `120` | Minimum seconds between bluetooth service auto-restart attempts |
 
 ---
 
@@ -157,8 +160,8 @@ Lists all saved CSV sessions (when logging is enabled).
 - `/ws` provides a live WebSocket telemetry stream.  
 - `/stats`, `/history`, and `/dashboard` provide rolling analytics and CSV logging.
 - Session data is automatically logged to CSV files in the `logs/` directory.
-- **Connection drops (e.g. low Bluetooth signal):** If the link drops after a few minutes, keep the HRM closer to the computer’s Bluetooth adapter. The server auto-reconnects; you can set `HRM_RECONNECT_DELAY_MS=300` for quicker reconnects.
-- **Linux `le-connection-abort-by-local`:** The server now waits 800 ms after scan and retries the connection up to 3 times. If it still fails, try increasing `LEAutoconnecttimeout` in `/etc/bluetooth/main.conf` (e.g. `LEAutoconnecttimeout=16000`), then restart Bluetooth.
+- **Connection drops (e.g. low Bluetooth signal):** The server now attempts an in-place HR notification re-subscribe before forcing a reconnect, then uses aggressive reconnect defaults.
+- **Linux `le-connection-abort-by-local`:** The server uses adaptive cooldowns after repeated aborts to avoid tight failure loops. If failures continue, enable `HRM_AUTO_RESTART_BLUETOOTH=true` and consider increasing `LEAutoconnecttimeout` in `/etc/bluetooth/main.conf` (e.g. `LEAutoconnecttimeout=16000`).
 
 ---
 
