@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using InTheHand.Bluetooth;
@@ -21,12 +22,16 @@ DateTimeOffset _lastLoggedTime = DateTimeOffset.MinValue;
 string? _activeId = null;
 bool _subscribed = false;
 EventHandler<GattCharacteristicValueChangedEventArgs>? _hrmHandler = null;
+GattCharacteristic? _activeHrmChar = null;
 DateTimeOffset _lastHrReceived = DateTimeOffset.MinValue;
 bool AllowZeroBpm = (Environment.GetEnvironmentVariable("ALLOW_ZERO_BPM") ?? "false").Equals("true", StringComparison.OrdinalIgnoreCase);
-var reconnectDelayMs = int.TryParse(Environment.GetEnvironmentVariable("HRM_RECONNECT_DELAY_MS"), out var rdm) && rdm > 0 ? rdm : 500;
-var connectDelayMs = int.TryParse(Environment.GetEnvironmentVariable("HRM_CONNECT_DELAY_MS"), out var cdm) && cdm >= 0 ? cdm : 800;
-var connectRetries = int.TryParse(Environment.GetEnvironmentVariable("HRM_CONNECT_RETRIES"), out var cr) && cr >= 1 ? cr : 3;
-var noDataTimeoutSec = int.TryParse(Environment.GetEnvironmentVariable("HRM_NO_DATA_TIMEOUT_SEC"), out var ndt) && ndt > 0 ? ndt : 45;
+var reconnectDelayMs = int.TryParse(Environment.GetEnvironmentVariable("HRM_RECONNECT_DELAY_MS"), out var rdm) && rdm > 0 ? rdm : 150;
+var connectDelayMs = int.TryParse(Environment.GetEnvironmentVariable("HRM_CONNECT_DELAY_MS"), out var cdm) && cdm >= 0 ? cdm : 150;
+var connectRetries = int.TryParse(Environment.GetEnvironmentVariable("HRM_CONNECT_RETRIES"), out var cr) && cr >= 1 ? cr : 5;
+var noDataTimeoutSec = int.TryParse(Environment.GetEnvironmentVariable("HRM_NO_DATA_TIMEOUT_SEC"), out var ndt) && ndt > 0 ? ndt : 20;
+var autoRestartBluetooth = (Environment.GetEnvironmentVariable("HRM_AUTO_RESTART_BLUETOOTH") ?? "false").Equals("true", StringComparison.OrdinalIgnoreCase);
+var restartThreshold = int.TryParse(Environment.GetEnvironmentVariable("HRM_BLUETOOTH_RESTART_THRESHOLD"), out var rst) && rst >= 3 ? rst : 12;
+var restartCooldownSec = int.TryParse(Environment.GetEnvironmentVariable("HRM_BLUETOOTH_RESTART_COOLDOWN_SEC"), out var rcs) && rcs >= 15 ? rcs : 120;
 
 void ConfigureApp(WebApplication app)
 {
@@ -195,6 +200,8 @@ async Task BleWorkerAsync(CancellationToken cancel)
     var BattChr = BluetoothUuid.FromShortId(0x2A19);
     
     Console.WriteLine($"[BLE] Worker starting on {RuntimeInformation.OSDescription}… token: " + desiredNameToken);
+    var consecutiveLocalAbortFailures = 0;
+    var lastBluetoothRestart = DateTimeOffset.MinValue;
 
     while (!cancel.IsCancellationRequested)
     {
@@ -265,8 +272,8 @@ async Task BleWorkerAsync(CancellationToken cancel)
 
             if (target is null)
             {
-                Console.WriteLine("[BLE] No matching device found. Retrying in 2s…");
-                await Task.Delay(2000, cancel);
+                Console.WriteLine("[BLE] No matching device found. Retrying quickly…");
+                await Task.Delay(700, cancel);
                 continue;
             }
 
@@ -290,6 +297,7 @@ async Task BleWorkerAsync(CancellationToken cancel)
                         Console.WriteLine($"[BLE] Connecting to {target.Name} ({target.Id}) …");
                     await target.Gatt.ConnectAsync();
                     lastConnectEx = null;
+                    consecutiveLocalAbortFailures = 0;
                     break;
                 }
                 catch (Exception ex)
@@ -300,7 +308,7 @@ async Task BleWorkerAsync(CancellationToken cancel)
                     {
                         if (msg.Contains("le-connection-abort-by-local", StringComparison.OrdinalIgnoreCase))
                             Console.WriteLine("[BLE] Connection aborted by adapter (often timing). Retrying…");
-                        await Task.Delay(2000, cancel);
+                        await Task.Delay(500, cancel);
                     }
                     else
                     {
@@ -314,9 +322,32 @@ async Task BleWorkerAsync(CancellationToken cancel)
             var gatt = target.Gatt;
             if (gatt is null || !gatt.IsConnected)
             {
+                if (lastConnectEx?.Message?.Contains("le-connection-abort-by-local", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    consecutiveLocalAbortFailures++;
+                    if (autoRestartBluetooth &&
+                        isLinux &&
+                        consecutiveLocalAbortFailures >= restartThreshold &&
+                        (DateTimeOffset.UtcNow - lastBluetoothRestart).TotalSeconds >= restartCooldownSec)
+                    {
+                        Console.WriteLine($"[BLE] Abort streak hit {consecutiveLocalAbortFailures}. Attempting bluetooth service restart…");
+                        var restarted = await TryRestartBluetoothServiceAsync(cancel);
+                        if (restarted)
+                        {
+                            lastBluetoothRestart = DateTimeOffset.UtcNow;
+                            consecutiveLocalAbortFailures = 0;
+                            await Task.Delay(1000, cancel);
+                            continue;
+                        }
+                    }
+                    var cooldownMs = Math.Min(8000, 400 * (1 << Math.Min(4, consecutiveLocalAbortFailures)));
+                    Console.WriteLine($"[BLE] Adapter abort streak: {consecutiveLocalAbortFailures}; cooldown {cooldownMs}ms before next scan.");
+                    await Task.Delay(cooldownMs, cancel);
+                    continue;
+                }
                 if (lastConnectEx is null)
                     Console.WriteLine("[BLE] GATT connection failed.");
-                await Task.Delay(2000, cancel);
+                await Task.Delay(600, cancel);
                 continue;
             }
 
@@ -422,12 +453,8 @@ async Task BleWorkerAsync(CancellationToken cancel)
                 continue;
             }
 
-            // Remove old handler if it exists (prevents duplicate handlers on reconnect)
-            if (_hrmHandler != null)
-            {
-                try { hrm.CharacteristicValueChanged -= _hrmHandler; } catch { }
-                _hrmHandler = null;
-            }
+            // Ensure stale subscriptions are fully torn down before re-subscribing.
+            ResetActiveConnection();
 
             Console.WriteLine("[BLE] Subscribing to HR notifications…");
             
@@ -472,16 +499,36 @@ async Task BleWorkerAsync(CancellationToken cancel)
 
             hrm.CharacteristicValueChanged += _hrmHandler;
             await hrm.StartNotificationsAsync();
+            _activeHrmChar = hrm;
             _subscribed = true;
             _lastHrReceived = DateTimeOffset.UtcNow; // grace period for first packet
 
             var noDataReconnect = false;
+            var resubscribeAttempted = false;
             while (!cancel.IsCancellationRequested && gatt.IsConnected)
             {
                 var elapsed = (DateTimeOffset.UtcNow - _lastHrReceived).TotalSeconds;
                 if (elapsed >= noDataTimeoutSec)
                 {
+                    if (!resubscribeAttempted && _activeHrmChar is not null)
+                    {
+                        resubscribeAttempted = true;
+                        Console.WriteLine($"[BLE] No HR data for {(int)elapsed}s; attempting in-place re-subscribe…");
+                        try
+                        {
+                            await _activeHrmChar.StopNotificationsAsync();
+                            await Task.Delay(100, cancel);
+                            await _activeHrmChar.StartNotificationsAsync();
+                            _lastHrReceived = DateTimeOffset.UtcNow; // grace period for restarted notifications
+                            continue;
+                        }
+                        catch
+                        {
+                            Console.WriteLine("[BLE] Re-subscribe failed; forcing reconnect.");
+                        }
+                    }
                     Console.WriteLine($"[BLE] No HR data for {(int)elapsed}s; reconnecting…");
+                    ResetActiveConnection();
                     SafeDisconnect(target);
                     noDataReconnect = true;
                     break;
@@ -491,17 +538,26 @@ async Task BleWorkerAsync(CancellationToken cancel)
 
             if (!noDataReconnect)
                 Console.WriteLine("[BLE] Disconnected.");
-            _subscribed = false;
-            _activeDev = null;
-            _activeId = null;
-            _hrmHandler = null; // Clear handler reference on disconnect
+            ResetActiveConnection();
             await Task.Delay(reconnectDelayMs, cancel);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            Console.WriteLine("[BLE] Error: " + ex.Message);
-            await Task.Delay(1500, cancel);
+            var msg = ex.Message ?? "";
+            Console.WriteLine("[BLE] Error: " + msg);
+            if (msg.Contains("ServicesResolved", StringComparison.OrdinalIgnoreCase) ||
+                msg.Contains("le-connection-abort-by-local", StringComparison.OrdinalIgnoreCase))
+            {
+                // These transient BlueZ failures often recover with an immediate reconnect cycle.
+                Console.WriteLine("[BLE] Fast reconnect path triggered.");
+                ResetActiveConnection();
+                if (_activeDev is not null)
+                    SafeDisconnect(_activeDev);
+                await Task.Delay(250, cancel);
+                continue;
+            }
+            await Task.Delay(600, cancel);
         }
     }
 }
@@ -509,6 +565,70 @@ async Task BleWorkerAsync(CancellationToken cancel)
 void SafeDisconnect(BluetoothDevice dev)
 {
     try { dev.Gatt?.Disconnect(); } catch { }
+}
+
+void ResetActiveConnection()
+{
+    if (_activeHrmChar is not null && _hrmHandler is not null)
+    {
+        try { _activeHrmChar.CharacteristicValueChanged -= _hrmHandler; } catch { }
+        try { _activeHrmChar.StopNotificationsAsync().GetAwaiter().GetResult(); } catch { }
+    }
+
+    _subscribed = false;
+    _activeHrmChar = null;
+    _activeDev = null;
+    _activeId = null;
+    _hrmHandler = null;
+}
+
+async Task<bool> TryRestartBluetoothServiceAsync(CancellationToken cancel)
+{
+    try
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "systemctl",
+            ArgumentList = { "restart", "bluetooth" },
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+        using var proc = Process.Start(psi);
+        if (proc is null)
+        {
+            Console.WriteLine("[BLE] Could not launch systemctl for bluetooth restart.");
+            return false;
+        }
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(8));
+        await proc.WaitForExitAsync(timeoutCts.Token);
+
+        if (proc.ExitCode == 0)
+        {
+            Console.WriteLine("[BLE] bluetooth service restart succeeded.");
+            return true;
+        }
+
+        var stderr = await proc.StandardError.ReadToEndAsync();
+        if (!string.IsNullOrWhiteSpace(stderr))
+            Console.WriteLine("[BLE] bluetooth restart failed: " + stderr.Trim());
+        else
+            Console.WriteLine("[BLE] bluetooth restart failed with exit code " + proc.ExitCode);
+        Console.WriteLine("[BLE] Tip: grant permission (sudoers/polkit) or restart manually: sudo systemctl restart bluetooth");
+        return false;
+    }
+    catch (OperationCanceledException)
+    {
+        Console.WriteLine("[BLE] bluetooth restart attempt timed out/cancelled.");
+        return false;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine("[BLE] bluetooth restart error: " + ex.Message);
+        return false;
+    }
 }
 
 async Task BroadcastAsync(object obj)
